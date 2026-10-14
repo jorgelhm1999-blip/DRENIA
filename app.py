@@ -21,9 +21,10 @@ from engine import (compare_basins, delineate, index_tiles, locate_whitebox,
 from ortho import local_ortho_image, pnoa_image
 from diagnostics import diagnostic_preview
 from landuse import landuse_summary, save_landuse_summary, yt_factors
-from landuse import RETURN_PERIODS
+from flow import FLOW_PERIODS
 from norm52 import DEFAULT_EQUIVALENCES, GROUPS, NORM_USES, threshold_summary
-from flow import concentration_time, rational_flows
+from flow import concentration_time, rational_flows, parse_ft
+from channel import main_channel, save_channel
 
 
 class Window(tk.Tk):
@@ -402,7 +403,7 @@ class Window(tk.Tk):
             outer.pack(fill='both', expand=True)
             ttk.Label(outer, text='Método racional · Cuenca menor de 50 km²',
                       font=('Segoe UI', 12, 'bold')).pack(anchor='w')
-            ttk.Label(outer, text='Introduce βm de la región y FT de cada periodo. Tc puede indicarse directamente o calcularse con L y J.',
+            ttk.Label(outer, text='DRENIA calcula L, J y Tc a partir de la red D8 guardada. Introduce βm regional y FT de cada periodo.',
                       wraplength=740).pack(anchor='w', pady=4)
             inputs = ttk.Frame(outer)
             inputs.pack(fill='x', pady=9)
@@ -425,11 +426,17 @@ class Window(tk.Tk):
                 ttk.Entry(inputs, textvariable=variable, width=15).grid(
                     row=index//2, column=(index%2)*2+1, padx=(0, 25), pady=4)
                 variables[key] = variable
+            channel_row = ttk.Frame(outer)
+            channel_row.pack(fill='x', pady=(0, 6))
+            channel_button = ttk.Button(channel_row, text='Calcular cauce principal, L, J y Tc')
+            channel_button.pack(side='left')
+            channel_status = tk.StringVar(value='Longitud y pendiente editables; el trazado se obtiene del MDT y la red de cauces.')
+            ttk.Label(channel_row, textvariable=channel_status, wraplength=510).pack(side='left', padx=9)
             ttk.Label(outer, text='FT por periodo de retorno · deja vacíos los periodos aún sin dato').pack(anchor='w')
             periods = ttk.Frame(outer)
             periods.pack(fill='x', pady=6)
             ft = {}
-            for i, period in enumerate(RETURN_PERIODS):
+            for i, period in enumerate(FLOW_PERIODS):
                 ttk.Label(periods, text=f'T{period}').grid(row=i//4*2, column=i%4*2,
                                                            sticky='w', padx=5)
                 v = tk.StringVar(value=initial.get('ft', {}).get(str(period), ''))
@@ -449,6 +456,61 @@ class Window(tk.Tk):
             def collect():
                 return {k: v.get().strip() for k, v in variables.items()} | {
                     'ft': {str(t): v.get().strip() for t, v in ft.items()}}
+
+            def on_channel(result):
+                variables['longitud_km'].set(f"{result['longitud_km']:.5f}")
+                variables['pendiente'].set(f"{result['pendiente_m_m']:.7f}")
+                variables['tc_h'].set('')
+                channel_status.set(f"Cotas {result['cota_max_m']:.2f}–{result['cota_min_m']:.2f} m · "
+                                   f"L {result['longitud_km']:.3f} km · J {result['pendiente_m_m']:.5f} · "
+                                   f"Tc {result['tc_h']:.3f} h")
+                channel_button.configure(state='normal')
+                store_inputs()
+
+            def on_channel_error(detail):
+                channel_button.configure(state='normal')
+                channel_status.set('No se pudo trazar el cauce: ' + detail)
+
+            def start_channel():
+                channel_button.configure(state='disabled')
+                channel_status.set('Trazando cauce principal desde los rásteres guardados…')
+                try:
+                    threshold_km2 = float(self.threshold.get().replace(',', '.'))
+                except ValueError:
+                    on_channel_error('Introduce un área mínima drenada válida en la ventana principal.')
+                    return
+                target = Path(report_dir.get())
+
+                def worker():
+                    try:
+                        basin_result, work = open_saved_result(folder)
+                        cache = target/'cauce_principal_metricas.json'
+                        files = [folder/'cuenca_mascara.tif', work/'direccion_d8.tif',
+                                 work/'acumulacion_celdas.tif', work/'mosaico.tif']
+                        fingerprint = [(p.stat().st_size, p.stat().st_mtime_ns) for p in files]
+                        if cache.is_file():
+                            stored_channel = json.loads(cache.read_text(encoding='utf-8'))
+                            if (stored_channel.get('umbral_cauce_km2') == threshold_km2 and
+                                    stored_channel.get('punto_vertido') == basin_result['punto_ajustado'] and
+                                    stored_channel.get('fuentes') == [list(x) for x in fingerprint]):
+                                self.events.put(('channel_ready', (dialog, on_channel, stored_channel)))
+                                return
+                        channel = main_channel(folder/'cuenca_mascara.tif', work/'direccion_d8.tif',
+                                               work/'acumulacion_celdas.tif', work/'mosaico.tif',
+                                               tuple(basin_result['punto_ajustado']), threshold_km2)
+                        channel['punto_vertido'] = basin_result['punto_ajustado']
+                        channel['fuentes'] = fingerprint
+                        target.mkdir(parents=True, exist_ok=True)
+                        save_channel(target, channel)
+                        cache.write_text(json.dumps({k: v for k, v in channel.items()
+                                                     if k != 'geometry'}, ensure_ascii=False, indent=2),
+                                         encoding='utf-8')
+                        self.events.put(('channel_ready', (dialog, on_channel, channel)))
+                    except Exception as exc:
+                        self.events.put(('channel_error', (dialog, on_channel_error, str(exc))))
+                threading.Thread(target=worker, daemon=True).start()
+
+            channel_button.configure(command=start_channel)
 
             def store_inputs():
                 target = Path(report_dir.get())
@@ -475,7 +537,7 @@ class Window(tk.Tk):
                         p0_initial=threshold['p0_inicial_ponderado_mm'],
                         cv=number(cv.get()), mean_daily_rain_mm=number(data['lluvia_media_mm']),
                         beta_m=number(data['beta_m']), torrentiality=number(data['i1_id']),
-                        tc_hours=tc, ft={t: number(v) for t, v in data['ft'].items() if v})
+                        tc_hours=tc, ft=parse_ft(data['ft']))
                     for item in outputs.get_children():
                         outputs.delete(item)
                     for item in result['periodos']:
@@ -497,6 +559,7 @@ class Window(tk.Tk):
             actions.pack(anchor='w')
             ttk.Button(actions, text='Guardar parámetros', command=store_inputs).pack(side='left')
             ttk.Button(actions, text='Calcular caudales', command=calculate_flows).pack(side='left', padx=8)
+            start_channel()
 
         save_row = ttk.Frame(frame)
         save_row.pack(fill='x', pady=(5, 0))
@@ -1046,6 +1109,14 @@ class Window(tk.Tk):
                         status.set('No se pudieron calcular las superficies.')
                         button.configure(state='normal')
                         messagebox.showerror('Superficies de usos', detail, parent=window)
+                elif kind == 'channel_ready':
+                    dialog, callback, metrics = value
+                    if dialog.winfo_exists():
+                        callback(metrics)
+                elif kind == 'channel_error':
+                    dialog, callback, detail = value
+                    if dialog.winfo_exists():
+                        callback(detail)
                 elif kind == 'error':
                     self.busy = False
                     self.calculate.configure(state='normal')

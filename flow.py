@@ -5,6 +5,14 @@ import math
 
 from landuse import RETURN_PERIODS, yt_factors
 
+FLOW_PERIODS = (2, 5, 10, 25, 50, 100, 500)
+
+
+def parse_ft(values: dict[str, str]) -> dict[int, float]:
+    """UI fields are string keyed; calculation periods must be integer keyed."""
+    return {int(period): float(raw.replace(',', '.'))
+            for period, raw in values.items() if raw.strip()}
+
 
 def concentration_time(length_km: float, slope: float) -> float:
     if length_km <= 0 or slope <= 0:
@@ -26,7 +34,7 @@ def rational_flows(*, area_km2: float, p0_initial: float, cv: float,
     kt = 1 + tc_hours**1.25/(tc_hours**1.25+14)
     exponent = 3.5287 - 2.5287*tc_hours**0.1
     rows = []
-    for t in RETURN_PERIODS:
+    for t in FLOW_PERIODS:
         factor = ft.get(t)
         if factor is None or factor <= 0:
             rows.append({'periodo': t, 'estado': 'Falta Ft'})

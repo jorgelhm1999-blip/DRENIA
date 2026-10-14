@@ -1,11 +1,15 @@
 """Regression against the numeric example in Arroyo de Humanejos.xlsx."""
 import unittest
 
-from flow import concentration_time, rational_flows
+from flow import concentration_time, rational_flows, parse_ft
 from norm52 import NORM_USES
 
 
 class FlowTest(unittest.TestCase):
+    def test_ui_ft_decimal_comma(self):
+        self.assertEqual(parse_ft({'5': '0,91', '100': '1.31', '200': ''}),
+                         {5: .91, 100: 1.31})
+
     def test_reference_workbook(self):
         tc = concentration_time(10.21485, (699-618.7)/10_214.85)
         self.assertAlmostEqual(tc, 4.405504965244777, places=10)
@@ -18,7 +22,7 @@ class FlowTest(unittest.TestCase):
         for period, expected in [(5, 1.4305828747815), (100, 5.26639115038557),
                                  (500, 9.18749037238687)]:
             self.assertAlmostEqual(rows[period]['caudal_m3_s'], expected, places=10)
-        self.assertEqual(rows[200]['estado'], 'Falta Ft')
+        self.assertNotIn(200, rows)
 
     def test_norm_rows_with_same_code_remain_distinct(self):
         self.assertEqual(len(NORM_USES), 177)
