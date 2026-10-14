@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -r requirements.txt pyinstaller
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name DRENIA --add-binary "bin/whitebox_tools.exe;bin" --collect-all rasterio --collect-all fiona --collect-all shapely app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name DRENIA --icon "assets/drenia_kyogre.ico" --add-data "assets/drenia_kyogre.ico;assets" --add-binary "bin/whitebox_tools.exe;bin" --collect-all rasterio --collect-all fiona --collect-all shapely app.py
       - uses: actions/upload-artifact@v4
         with:
           name: DRENIA-Windows

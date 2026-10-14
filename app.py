@@ -7,6 +7,7 @@ import tkinter as tk
 import math
 import json
 import re
+import sys
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -31,6 +32,9 @@ class Window(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('DRENIA · Delimitación de cuencas')
+        icon = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'assets' / 'drenia_kyogre.ico'
+        if icon.exists():
+            self.iconbitmap(str(icon))
         self.geometry('1250x860')
         self.minsize(980, 730)
         self.tiles = []
