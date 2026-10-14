@@ -1,12 +1,12 @@
-# Cuenca Fácil — aplicación de escritorio local
+# DRENIA — aplicación de escritorio local
 
 Selecciona un GeoTIFF, calcula y visualiza la red de drenaje, marca sobre ella el punto de vertido y delimita su cuenca. También puedes introducir directamente las coordenadas X/Y del punto en el CRS del MDT. La aplicación busca otras teselas en la carpeta elegida, las incorpora si la cuenca llega a un borde y vuelve a calcular hasta que deja de crecer. No necesita QGIS, navegador, servidor ni Node.js para funcionar.
 
-## Obtener `CuencaFacil.exe` sin instalar Python en tu ordenador
+## Obtener `DRENIA.exe` sin instalar Python en tu ordenador
 
-1. Crea un **repositorio privado** en GitHub y sube **todo el contenido de esta carpeta** a la raíz. Incluye `.github/workflows/windows.yml`; no subas los MDT al repositorio.
-2. Abre **Actions → Construir aplicacion privada para Windows → Run workflow**.
-3. Al terminar, descarga el artefacto **CuencaFacil-Windows**, descomprímelo y ejecuta `CuencaFacil.exe` dentro de la carpeta descargada. **Conserva toda la carpeta** junto al `.exe`.
+1. En el repositorio de DRENIA conserva `.github/workflows/windows.yml`; no subas los MDT al repositorio.
+2. Abre **Actions → Construir DRENIA para Windows → Run workflow**.
+3. Al terminar, descarga el artefacto **DRENIA-Windows**, descomprímelo y ejecuta `DRENIA.exe` dentro de la carpeta descargada. **Conserva toda la carpeta** junto al `.exe`.
 
 El proceso empaqueta Python, las bibliotecas GIS y WhiteboxTools en el equipo Windows de GitHub. El uso posterior del programa es local. La construcción requiere que el servidor de WhiteboxTools esté disponible en ese momento. Si tu organización restringe GitHub Actions, puedes construirlo en un Windows con Python 3.12: descarga el ejecutable oficial `whitebox_tools.exe` a `bin/` y ejecuta `build_windows.bat`.
 
@@ -21,6 +21,10 @@ El proceso empaqueta Python, las bibliotecas GIS y WhiteboxTools en el equipo Wi
 6. Si la cuenca de referencia invade otra hoja, escoge esa hoja en «Comprobar teselas vecinas» y pulsa **Auditar y comparar**. Puedes elegir «Todas las teselas vecinas» si procede; esta opción puede requerir más tiempo y memoria. La auditoría conserva el mismo punto de vertido, repite el análisis incluyendo las teselas indicadas y guarda otra cuenca y un ráster de diferencias. En `diferencias_auditoria.tif`, 1 significa **solo en la cuenca original**, 2 significa **solo en la auditada** y 0 significa **sin diferencia**. `comparacion.json` informa las superficies ganadas y perdidas y el porcentaje de coincidencia espacial. Si aparecen diferencias en el límite de la hoja omitida, la selección automática de teselas influyó en la primera delimitación. Si persisten discrepancias con QGIS, revisa el punto, el tratamiento de depresiones, el modelo de flujo y el MDT empleado.
 
 Los MDT deben tener coordenadas horizontales en metros (por ejemplo ETRS89/UTM), misma proyección, resolución y retícula alineada. Las teselas incompatibles se señalan en `resultado.json` y no se remuestrean silenciosamente. El programa usa la primera banda. En caso de rasters con huecos NoData, estos se comprueban igual que los bordes. Los TIFF de salida previos deben quedar fuera de la carpeta de MDT.
+
+## Reabrir un análisis ya calculado
+
+Pulsa **Abrir análisis guardado…** y selecciona la carpeta que contiene `resultado.json`, `cuenca_mascara.tif` y `pasada_XX/` o `preparacion/`. DRENIA valida los archivos, muestra de nuevo la cuenca, los cauces y las vistas D8 sin volver a ejecutar WhiteboxTools. La carpeta puede moverse completa. Para auditar o recalcular, las teselas originales deben seguir accesibles; si ya no están en la ruta original, elige su carpeta cuando aparezca el diálogo. Si omites el diálogo, puedes consultar el resultado; para asociar las teselas después, vuelve a abrir el análisis guardado. Conserva toda la carpeta de resultados, incluidas las subcarpetas de cada pasada.
 
 ## Método y resultados
 
@@ -38,7 +42,7 @@ La carpeta de resultados contiene:
 
 La metodología D8 y la corrección de depresiones son decisiones hidráulicas que pueden alterar divisorias, especialmente ante puentes, terraplenes, rellenos y vaguadas modificadas. El ajuste a máxima acumulación puede mover el vertido a otro ramal si el radio es excesivo. Comprueba el trazado sobre ortofoto y cartografía de cauces antes de emplearlo en un documento técnico. El estado **COMPLETA** confirma que la cuenca no toca huecos ni límites del conjunto de teselas disponible; no garantiza por sí mismo la calidad del MDT.
 
-La capa «Drainage Basins» de SAGA/QGIS divide la superficie en cuencas de drenaje y permite una comparación visual de divisorias. Cuenca Fácil **no la usa para recortar ni forzar la cuenca**: calcula el área aportante específica al punto de vertido con `Watershed` de WhiteboxTools. Un área total parecida a la de QGIS no demuestra por sí sola que las dos cuencas ocupen las mismas celdas. La selección automática incorpora nuevas hojas al detectar que su propia cuenca llega a un borde; para comprobar una hoja vecina que no detectó se usa la auditoría del paso 6.
+La capa «Drainage Basins» de SAGA/QGIS divide la superficie en cuencas de drenaje y permite una comparación visual de divisorias. DRENIA **no la usa para recortar ni forzar la cuenca**: calcula el área aportante específica al punto de vertido con `Watershed` de WhiteboxTools. Un área total parecida a la de QGIS no demuestra por sí sola que las dos cuencas ocupen las mismas celdas. La selección automática incorpora nuevas hojas al detectar que su propia cuenca llega a un borde; para comprobar una hoja vecina que no detectó se usa la auditoría del paso 6.
 
 Para probar los cálculos antes de usar datos reales: `python smoke_test.py RUTA_A_whitebox_tools`. La prueba crea dos teselas sintéticas de 2 m, dibuja y reutiliza la red previa, fuerza una ampliación y comprueba el área y los formatos exportados.
 

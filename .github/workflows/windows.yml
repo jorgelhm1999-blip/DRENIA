@@ -1,4 +1,4 @@
-name: Construir aplicacion privada para Windows
+name: Construir DRENIA para Windows
 on:
   workflow_dispatch:
 jobs:
@@ -25,8 +25,8 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -r requirements.txt pyinstaller
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name CuencaFacil --add-binary "bin/whitebox_tools.exe;bin" --collect-all rasterio --collect-all fiona app.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name DRENIA --add-binary "bin/whitebox_tools.exe;bin" --collect-all rasterio --collect-all fiona app.py
       - uses: actions/upload-artifact@v4
         with:
-          name: CuencaFacil-Windows
-          path: dist/CuencaFacil/
+          name: DRENIA-Windows
+          path: dist/DRENIA/

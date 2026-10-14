@@ -28,7 +28,7 @@ def pnoa_image(bounds, crs, width, height) -> Image.Image:
         'WIDTH': int(width), 'HEIGHT': int(height),
     }
     request = Request(PNOA_WMS + '?' + urlencode(parameters),
-                      headers={'User-Agent': 'CuencaFacil/0.4 (cartografia local)'})
+                      headers={'User-Agent': 'DRENIA/0.6 (cartografia local)'})
     with urlopen(request, timeout=25) as response:
         payload = response.read(18_000_000)
     try:

@@ -7,6 +7,6 @@ if not exist "bin\whitebox_tools.exe" (
 )
 py -3.12 -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 exit /b 1
-py -3.12 -m PyInstaller --noconfirm --clean --onedir --windowed --name CuencaFacil --add-binary "bin\whitebox_tools.exe;bin" --collect-all rasterio --collect-all fiona app.py
+py -3.12 -m PyInstaller --noconfirm --clean --onedir --windowed --name DRENIA --add-binary "bin\whitebox_tools.exe;bin" --collect-all rasterio --collect-all fiona app.py
 if errorlevel 1 exit /b 1
-echo Ejecutable: dist\CuencaFacil\CuencaFacil.exe
+echo Ejecutable: dist\DRENIA\DRENIA.exe

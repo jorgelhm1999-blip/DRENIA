@@ -17,7 +17,7 @@ from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 
 from engine import (compare_basins, delineate, index_tiles, locate_whitebox,
-                    neighboring_tiles, prepare_hydrology, snap_to_stream)
+                    neighboring_tiles, open_saved_result, prepare_hydrology, snap_to_stream)
 from ortho import local_ortho_image, pnoa_image
 from diagnostics import diagnostic_preview
 
@@ -25,7 +25,7 @@ from diagnostics import diagnostic_preview
 class Window(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cuenca Fácil · Delimitación de cuencas')
+        self.title('DRENIA · Delimitación de cuencas')
         self.geometry('1250x860')
         self.minsize(980, 730)
         self.tiles = []
@@ -71,7 +71,7 @@ class Window(tk.Tk):
         left.pack(side='left', fill='y')
         left.configure(width=335)
         left.pack_propagate(False)
-        ttk.Label(left, text='CUENCA FÁCIL', font=('Segoe UI', 17, 'bold')).pack(anchor='w')
+        ttk.Label(left, text='DRENIA', font=('Segoe UI', 17, 'bold')).pack(anchor='w')
         ttk.Label(left, text='MDT local · Cauces y cuenca desde un vertido',
                   wraplength=300).pack(anchor='w', pady=(1, 6))
         self._heading(left, '1  Carpeta y tesela inicial')
@@ -121,6 +121,7 @@ class Window(tk.Tk):
         ttk.Button(left, text='Elegir carpeta de resultados', command=self.pick_output).pack(fill='x')
         self.calculate = ttk.Button(left, text='Delimitar cuenca', command=self.start)
         self.calculate.pack(fill='x', pady=(12, 5), ipady=7)
+        ttk.Button(left, text='Abrir análisis guardado…', command=self.pick_saved_result).pack(fill='x')
         self.status = tk.StringVar(value='Elige una carpeta con teselas GeoTIFF.')
         ttk.Label(left, textvariable=self.status, wraplength=300,
                   foreground='#11645d').pack(anchor='w', pady=(3, 0))
@@ -200,6 +201,93 @@ class Window(tk.Tk):
     def pick_output(self):
         path = filedialog.askdirectory(title='Carpeta de resultados')
         if path: self.output.set(path)
+
+    def pick_saved_result(self):
+        if self.busy:
+            return
+        folder = filedialog.askdirectory(title='Carpeta con resultado.json y cuenca_mascara.tif')
+        if folder:
+            try:
+                self.restore_saved_result(Path(folder))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                messagebox.showerror('No se pudo abrir el análisis', str(exc))
+
+    def restore_saved_result(self, destination: Path):
+        result, work = open_saved_result(destination)
+        point = tuple(result['punto_inicial'])
+        if len(point) != 2:
+            raise ValueError('El punto guardado no contiene dos coordenadas.')
+        seed = Path(result.get('tesela_inicial', ''))
+        candidates = [Path(result['carpeta_mdt'])] if result.get('carpeta_mdt') else []
+        used = [Path(p) for p in result['teselas']]
+        if not seed.is_file():
+            seed = next((p for p in used if p.is_file() and
+                         self._point_in_tile(p, point)), Path())
+        if seed.is_file():
+            candidates.insert(0, seed.parent)
+        elif used:
+            candidates.append(used[0].parent)
+        source = next((p for p in candidates if p.is_dir()), None)
+        if source is None:
+            source = filedialog.askdirectory(title='Localiza la carpeta de MDT para continuar')
+        if source:
+            self.folder.set(str(source))
+            self.tiles, errors = index_tiles(Path(source))
+            self.tile_box['values'] = [str(t.path.relative_to(source)) for t in self.tiles]
+            matches = [i for i, tile in enumerate(self.tiles)
+                       if tile.bounds[0] <= point[0] < tile.bounds[2]
+                       and tile.bounds[1] < point[1] <= tile.bounds[3]]
+            if matches:
+                self.tile_box.current(matches[0])
+                self.load_preview()
+                seed = self.tiles[matches[0]].path
+            else:
+                self.tile_box.set('')
+                self.tiles = []
+            for error in errors[:5]:
+                self._log('Se omite ' + error)
+        else:
+            self.tiles = []
+            self.tile_box['values'] = []
+            self.tile_box.set('')
+        self.output.set(str(destination))
+        self.radius.set(str(result['radio_ajuste_m']))
+        self.breach.set(str(result['busqueda_brecha_celdas']))
+        self.outlet = point
+        self.x_coord.set(f'{point[0]:.2f}')
+        self.y_coord.set(f'{point[1]:.2f}')
+        self.result_outlet = tuple(result['punto_ajustado'])
+        self.point_label.configure(text=f'X {point[0]:.2f} · Y {point[1]:.2f}\nPunto ajustado: '
+                                        f'{self.result_outlet[0]:.2f}, {self.result_outlet[1]:.2f}')
+        self.load_result_preview(destination, work)
+        self.accum_path = work/'acumulacion_celdas.tif'
+        self.hydro_folder = work
+        self.diagnostic_generation += 1
+        self.diagnostic_images.clear()
+        self.select_view()
+        self.refresh_stream_overlay()
+        self.last_run = ({'result': result, 'destination': destination,
+                          'seed': seed, 'point': point, 'radius': float(result['radio_ajuste_m']),
+                          'breach': int(result['busqueda_brecha_celdas'])}
+                         if self.tiles else None)
+        self.audit_candidates = []
+        self.audit_box['values'] = []
+        self.audit_button.configure(state='disabled')
+        if self.last_run:
+            self.update_audit_options()
+        self.status.set(f'Análisis recuperado · {result["area_km2"]:.4f} km²')
+        if not self.tiles:
+            self._log('Análisis recuperado. Para recalcular o auditar, vuelve a seleccionar la carpeta de MDT.')
+        self.draw()
+
+    @staticmethod
+    def _point_in_tile(path, point):
+        try:
+            with rasterio.open(path) as ds:
+                b = ds.bounds
+                return b.left <= point[0] < b.right and b.bottom < point[1] <= b.top
+        except (OSError, rasterio.errors.RasterioError):
+            return False
 
     def pick_binary(self):
         path = filedialog.askopenfilename(title='Ejecutable whitebox_tools')
@@ -457,7 +545,7 @@ class Window(tk.Tk):
             self.stream_overlay = Image.fromarray(color, 'RGBA')
             self.draw()
             self._log(f'Cauces visibles: umbral {threshold:g} km². Aporte preliminar limitado a la tesela inicial.')
-            if self.outlet: self.set_point(self.outlet)
+            if self.outlet and self.overlay is None: self.set_point(self.outlet)
             if not np.any(network):
                 self._log('No aparecen cauces: reduce el área mínima drenada y pulsa Actualizar.')
         except (ValueError, OSError) as exc:
@@ -545,6 +633,12 @@ class Window(tk.Tk):
         if not self.last_run:
             return
         selected = {Path(path) for path in self.last_run['result']['teselas']}
+        if not selected.issubset({t.path for t in self.tiles}):
+            self.audit_candidates = []
+            self.audit_box['values'] = []
+            self.audit_button.configure(state='disabled')
+            self._log('Para auditar, selecciona la carpeta original de MDT con todas las teselas utilizadas.')
+            return
         self.audit_candidates = neighboring_tiles(self.tiles, selected)
         choices = ([f'Todas las teselas vecinas ({len(self.audit_candidates)})'] +
                    [t.path.name for t in self.audit_candidates]) if self.audit_candidates else []

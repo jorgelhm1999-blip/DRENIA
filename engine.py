@@ -364,6 +364,28 @@ def export_results(folder: Path, watershed: Path, dem: Path, metadata: dict) -> 
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
 
+def open_saved_result(folder: Path) -> tuple[dict, Path]:
+    """Validate a completed run and locate its final rasters after a folder move."""
+    folder = Path(folder).resolve()
+    result = json.loads((folder/'resultado.json').read_text(encoding='utf-8'))
+    for key in ('area_km2', 'punto_inicial', 'punto_ajustado', 'teselas',
+                'directorio_final', 'radio_ajuste_m', 'busqueda_brecha_celdas'):
+        if key not in result:
+            raise ValueError(f'El resultado guardado carece de {key}.')
+    work = folder / Path(result['directorio_final']).name
+    required = [folder/'cuenca_mascara.tif', work/'mosaico.tif',
+                work/'direccion_d8.tif', work/'acumulacion_celdas.tif']
+    missing = [str(path.relative_to(folder)) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError('Faltan archivos para reabrir el análisis: ' + ', '.join(missing))
+    with rasterio.open(required[0]) as basin, rasterio.open(required[1]) as dem:
+        if (basin.crs != dem.crs or basin.transform != dem.transform or
+                basin.shape != dem.shape):
+            raise ValueError('La máscara y el mosaico guardados no coinciden.')
+    result['directorio_final'] = str(work)
+    return result, work
+
+
 def delineate(tiles: list[Tile], seed: Path, point: tuple[float, float], out: Path,
               whitebox: Path, snap_radius: float = 12, breach_cells: int = 50,
               log: Log = print, fixed_point: tuple[float, float] | None = None,
@@ -420,6 +442,7 @@ def delineate(tiles: list[Tile], seed: Path, point: tuple[float, float], out: Pa
                  [f'--d8_pntr={pntr}', f'--pour_pts={pour}', f'--output={basin}'], log)
         additions, incompatible, uncovered = frontier(basin, dem, tiles, selected, base)
         result = {'punto_inicial': list(point), 'punto_ajustado': list(snapped),
+                  'tesela_inicial': str(seed), 'carpeta_mdt': str(seed.parent),
                   'desplazamiento_m': math.dist(point, snapped), 'acumulacion_celdas': contributing,
                   'radio_ajuste_m': snap_radius, 'busqueda_brecha_celdas': breach_cells,
                   'teselas': [str(p) for p in sorted(selected)], 'teselas_incompatibles':

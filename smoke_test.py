@@ -13,7 +13,7 @@ from PIL import Image
 from rasterio.transform import from_origin
 
 from engine import (compare_basins, delineate, index_tiles, locate_whitebox,
-                    neighboring_tiles, prepare_hydrology, snap_to_flow, snap_to_stream)
+                    neighboring_tiles, open_saved_result, prepare_hydrology, snap_to_flow, snap_to_stream)
 from app import Window
 from ortho import local_ortho_image, pnoa_image
 from diagnostics import diagnostic_preview
@@ -80,6 +80,16 @@ def main():
         assert result['desplazamiento_m'] <= 4
         assert tuple(result['punto_ajustado']) == stream_point
         assert (output/'preparacion'/'registro_motor.txt').read_text().count('=== BreachDepressionsLeastCost ===') == 1
+        saved, final_directory = open_saved_result(output)
+        assert saved['area_km2'] == result['area_km2']
+        assert final_directory == Path(result['directorio_final'])
+        # Reopening works after moving the complete results folder.
+        moved = root/'resultado_movido'
+        output.rename(moved)
+        saved, moved_work = open_saved_result(moved)
+        assert moved_work == moved/final_directory.name
+        assert saved['area_km2'] == result['area_km2']
+        output = moved
         assert not result['resultado_completo']  # cuenca abierta aguas arriba
         with rasterio.open(output/'cuenca_mascara.tif') as ds:
             assert ds.crs.to_epsg() == 25830
