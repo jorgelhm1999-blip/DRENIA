@@ -20,6 +20,7 @@ from engine import (compare_basins, delineate, index_tiles, locate_whitebox,
                     neighboring_tiles, open_saved_result, prepare_hydrology, snap_to_stream)
 from ortho import local_ortho_image, pnoa_image
 from diagnostics import diagnostic_preview
+from landuse import landuse_summary, save_landuse_summary, yt_factors
 
 
 class Window(tk.Tk):
@@ -122,6 +123,8 @@ class Window(tk.Tk):
         self.calculate = ttk.Button(left, text='Delimitar cuenca', command=self.start)
         self.calculate.pack(fill='x', pady=(12, 5), ipady=7)
         ttk.Button(left, text='Abrir análisis guardado…', command=self.pick_saved_result).pack(fill='x')
+        ttk.Button(left, text='Precipitación YT y superficies de usos…',
+                   command=self.show_landuse).pack(fill='x', pady=(5, 0))
         self.status = tk.StringVar(value='Elige una carpeta con teselas GeoTIFF.')
         ttk.Label(left, textvariable=self.status, wraplength=300,
                   foreground='#11645d').pack(anchor='w', pady=(3, 0))
@@ -211,6 +214,76 @@ class Window(tk.Tk):
                 self.restore_saved_result(Path(folder))
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 messagebox.showerror('No se pudo abrir el análisis', str(exc))
+
+    def show_landuse(self):
+        if not self.last_run and not (Path(self.output.get())/'cuenca.gpkg').is_file():
+            messagebox.showinfo('Falta la cuenca', 'Delimita o abre primero un análisis guardado.')
+            return
+        folder = Path(self.output.get())
+        window = tk.Toplevel(self)
+        window.title('DRENIA · YT y superficies por uso')
+        window.geometry('680x560')
+        window.transient(self)
+        frame = ttk.Frame(window, padding=14)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Factores YT de máximas lluvias diarias',
+                  font=('Segoe UI', 11, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='Tabla aportada: Cv 0,30–0,52. Valores intermedios por interpolación lineal.').pack(anchor='w')
+        cv = tk.StringVar(value='0,34')
+        row = ttk.Frame(frame)
+        row.pack(fill='x', pady=(8, 3))
+        ttk.Label(row, text='Cv').pack(side='left')
+        ttk.Entry(row, textvariable=cv, width=10).pack(side='left', padx=8)
+        factors = ttk.Label(frame, text='', wraplength=630, justify='left')
+        factors.pack(anchor='w', pady=(0, 14))
+
+        def update_factors(*_):
+            try:
+                values = yt_factors(float(cv.get().replace(',', '.')))
+                factors.configure(text='     '.join(f'T{t}: {values[t]:.3f}' for t in (2, 5, 10, 25)) +
+                                  '\n' + '     '.join(f'T{t}: {values[t]:.3f}' for t in (50, 100, 200, 500)))
+            except ValueError as exc:
+                factors.configure(text=str(exc))
+        cv.trace_add('write', update_factors)
+        update_factors()
+        ttk.Separator(frame).pack(fill='x', pady=8)
+        ttk.Label(frame, text='Superficies dentro de la cuenca',
+                  font=('Segoe UI', 11, 'bold')).pack(anchor='w')
+        source = tk.StringVar()
+        ttk.Entry(frame, textvariable=source).pack(fill='x', pady=(8, 3))
+        ttk.Button(frame, text='Elegir GeoPackage de usos…',
+                   command=lambda: source.set(filedialog.askopenfilename(parent=window,
+                                      filetypes=[('GeoPackage', '*.gpkg')]) or source.get())).pack(anchor='w')
+        ttk.Label(frame, text='Las áreas se calculan por intersección vectorial exacta; no se asignan todavía coeficientes de escorrentía.',
+                  wraplength=620).pack(anchor='w', pady=7)
+        run = ttk.Button(frame, text='Calcular superficies', state='normal')
+        run.pack(anchor='w', pady=4)
+        status = tk.StringVar(value='Selecciona el GeoPackage de usos del suelo.')
+        ttk.Label(frame, textvariable=status, wraplength=620).pack(anchor='w')
+        table = ttk.Treeview(frame, columns=('uso', 'ha'), show='headings')
+        table.heading('uso', text='Uso del suelo')
+        table.heading('ha', text='Superficie (ha)')
+        table.column('uso', width=440)
+        table.column('ha', width=140, anchor='e')
+        table.pack(fill='both', expand=True, pady=7)
+
+        def calculate():
+            path = Path(source.get())
+            if not path.is_file():
+                messagebox.showerror('Falta el GeoPackage', 'Selecciona un archivo .gpkg existente.', parent=window)
+                return
+            run.configure(state='disabled')
+            status.set('Cortando los polígonos por la cuenca…')
+
+            def worker():
+                try:
+                    summary = landuse_summary(folder/'cuenca.gpkg', path)
+                    saved = save_landuse_summary(folder, summary, path)
+                    self.events.put(('landuse_done', (window, table, run, status, summary, saved)))
+                except Exception as exc:
+                    self.events.put(('landuse_error', (window, run, status, str(exc))))
+            threading.Thread(target=worker, daemon=True).start()
+        run.configure(command=calculate)
 
     def restore_saved_result(self, destination: Path):
         result, work = open_saved_result(destination)
@@ -714,6 +787,25 @@ class Window(tk.Tk):
                         if self.view_mode.get() == mode: self.draw()
                 elif kind == 'diagnostic_error':
                     self._log('No se pudo mostrar el ráster hidrológico: ' + value)
+                elif kind == 'landuse_done':
+                    window, table, button, status, summary, saved = value
+                    if window.winfo_exists():
+                        for item in table.get_children():
+                            table.delete(item)
+                        for item in summary['superficies']:
+                            table.insert('', 'end', values=(item['uso'], f"{item['ha']:.4f}"))
+                        status.set(f"{summary['poligonos_intersectados']} polígonos · "
+                                   f"{summary['usos_m2']/10_000:.4f} ha clasificados · "
+                                   f"cuenca vectorial {summary['cuenca_m2']/10_000:.4f} ha · "
+                                   f"diferencia {summary['desviacion_m2']/10_000:+.4f} ha. "
+                                   f"Guardado en {saved.name}")
+                        button.configure(state='normal')
+                elif kind == 'landuse_error':
+                    window, button, status, detail = value
+                    if window.winfo_exists():
+                        status.set('No se pudieron calcular las superficies.')
+                        button.configure(state='normal')
+                        messagebox.showerror('Superficies de usos', detail, parent=window)
                 elif kind == 'error':
                     self.busy = False
                     self.calculate.configure(state='normal')
