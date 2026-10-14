@@ -21,6 +21,7 @@ from engine import (compare_basins, delineate, index_tiles, locate_whitebox,
 from ortho import local_ortho_image, pnoa_image
 from diagnostics import diagnostic_preview
 from landuse import landuse_summary, save_landuse_summary, yt_factors
+from norm52 import DEFAULT_EQUIVALENCES, GROUPS, NORM_USES, threshold_summary
 
 
 class Window(tk.Tk):
@@ -221,8 +222,8 @@ class Window(tk.Tk):
             return
         folder = Path(self.output.get())
         window = tk.Toplevel(self)
-        window.title('DRENIA · YT y superficies por uso')
-        window.geometry('680x560')
+        window.title('DRENIA · YT, superficies y umbral de escorrentía')
+        window.geometry('850x650')
         window.transient(self)
         frame = ttk.Frame(window, padding=14)
         frame.pack(fill='both', expand=True)
@@ -254,18 +255,104 @@ class Window(tk.Tk):
         ttk.Button(frame, text='Elegir GeoPackage de usos…',
                    command=lambda: source.set(filedialog.askopenfilename(parent=window,
                                       filetypes=[('GeoPackage', '*.gpkg')]) or source.get())).pack(anchor='w')
-        ttk.Label(frame, text='Las áreas se calculan por intersección vectorial exacta; no se asignan todavía coeficientes de escorrentía.',
-                  wraplength=620).pack(anchor='w', pady=7)
+        ttk.Label(frame, text='Corte vectorial exacto. Equivalencias revisables de la tabla 2.3; pendiente <3 % y práctica R/N cuando procedan.',
+                  wraplength=800).pack(anchor='w', pady=7)
         run = ttk.Button(frame, text='Calcular superficies', state='normal')
         run.pack(anchor='w', pady=4)
         status = tk.StringVar(value='Selecciona el GeoPackage de usos del suelo.')
-        ttk.Label(frame, textvariable=status, wraplength=620).pack(anchor='w')
-        table = ttk.Treeview(frame, columns=('uso', 'ha'), show='headings')
+        ttk.Label(frame, textvariable=status, wraplength=800).pack(anchor='w')
+        group = tk.StringVar(value='B')
+        soil = ttk.Frame(frame)
+        soil.pack(fill='x', pady=(8, 2))
+        ttk.Label(soil, text='Grupo hidrológico de suelo').pack(side='left')
+        ttk.Combobox(soil, textvariable=group, values=GROUPS, state='readonly', width=5).pack(side='left', padx=8)
+        p0_label = tk.StringVar(value='P₀ inicial ponderado: pendiente de clasificar')
+        ttk.Label(soil, textvariable=p0_label).pack(side='left', padx=10)
+        table = ttk.Treeview(frame, columns=('uso', 'ha', 'norma', 'p0'), show='headings')
         table.heading('uso', text='Uso del suelo')
         table.heading('ha', text='Superficie (ha)')
-        table.column('uso', width=440)
-        table.column('ha', width=140, anchor='e')
+        table.heading('norma', text='Fila 5.2-IC')
+        table.heading('p0', text='P₀ⁱ (mm)')
+        table.column('uso', width=300)
+        table.column('ha', width=130, anchor='e')
+        table.column('norma', width=140, anchor='center')
+        table.column('p0', width=90, anchor='e')
         table.pack(fill='both', expand=True, pady=7)
+        assignment = ttk.Frame(frame)
+        assignment.pack(fill='x')
+        ttk.Label(assignment, text='Fila normativa para el uso seleccionado').pack(side='left')
+        options = ['Sin equivalencia'] + [f'{key} · {value.label}' for key, value in NORM_USES.items()]
+        selected_norm = tk.StringVar(value=options[0])
+        norm_box = ttk.Combobox(assignment, textvariable=selected_norm, values=options,
+                                state='readonly', width=38)
+        norm_box.pack(side='left', padx=6)
+        mapping = {}
+        current = {'summary': None}
+
+        def refresh_threshold(*_):
+            summary = current['summary']
+            if summary is None:
+                return
+            areas = {entry['uso']: entry['m2'] for entry in summary['superficies']}
+            result = threshold_summary(areas, group.get(), mapping)
+            for item in table.get_children():
+                table.delete(item)
+            for entry in result['filas']:
+                table.insert('', 'end', iid=entry['uso_siose'], values=(
+                    entry['uso_siose'], f"{entry['area_m2']/10_000:.4f}",
+                    entry['fila_52ic'] or 'Revisar',
+                    entry['p0_inicial_mm'] if entry['p0_inicial_mm'] is not None else '—'))
+            if result['p0_inicial_ponderado_mm'] is None:
+                p0_label.set(f"Sin equivalencia: {result['area_sin_equivalencia_m2']/10_000:.4f} ha")
+            else:
+                p0_label.set(f"P₀ⁱ ponderado: {result['p0_inicial_ponderado_mm']:.3f} mm")
+            (folder/'umbrales_52ic.json').write_text(
+                json.dumps({'tabla': '5.2-IC, tabla 2.3', 'fuente': source.get(),
+                            'equivalencias': mapping, **result},
+                           ensure_ascii=False, indent=2), encoding='utf-8')
+
+        group.trace_add('write', refresh_threshold)
+
+        def select_row(_):
+            chosen = table.selection()
+            if chosen:
+                code = mapping.get(chosen[0])
+                selected_norm.set(next((item for item in options if item.startswith(code + ' · ')),
+                                       options[0]) if code else options[0])
+        table.bind('<<TreeviewSelect>>', select_row)
+
+        def apply_assignment():
+            chosen = table.selection()
+            if not chosen:
+                messagebox.showinfo('Selecciona un uso', 'Selecciona primero una fila de la tabla.', parent=window)
+                return
+            mapping[chosen[0]] = selected_norm.get().split(' · ', 1)[0] if selected_norm.get() != options[0] else None
+            refresh_threshold()
+            table.selection_set(chosen[0])
+        ttk.Button(assignment, text='Aplicar', command=apply_assignment).pack(side='left')
+
+        def on_result(summary, saved):
+            current['summary'] = summary
+            mapping.clear()
+            mapping.update({entry['uso']: DEFAULT_EQUIVALENCES.get(entry['uso'])
+                            for entry in summary['superficies']})
+            previous = folder/'umbrales_52ic.json'
+            if previous.is_file():
+                try:
+                    old = json.loads(previous.read_text(encoding='utf-8'))
+                    if old.get('fuente') == source.get():
+                        mapping.update({name: code for name, code in old['equivalencias'].items()
+                                        if name in mapping and (code is None or code in NORM_USES)})
+                        group.set(old['grupo_suelo'])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            refresh_threshold()
+            status.set(f"{summary['poligonos_intersectados']} polígonos · "
+                       f"{summary['usos_m2']/10_000:.4f} ha clasificados · "
+                       f"cuenca vectorial {summary['cuenca_m2']/10_000:.4f} ha · "
+                       f"diferencia {summary['desviacion_m2']/10_000:+.4f} ha. "
+                       f"Guardado en {saved.name} y umbrales_52ic.json")
+            run.configure(state='normal')
 
         def calculate():
             path = Path(source.get())
@@ -279,7 +366,7 @@ class Window(tk.Tk):
                 try:
                     summary = landuse_summary(folder/'cuenca.gpkg', path)
                     saved = save_landuse_summary(folder, summary, path)
-                    self.events.put(('landuse_done', (window, table, run, status, summary, saved)))
+                    self.events.put(('landuse_done', (window, on_result, summary, saved)))
                 except Exception as exc:
                     self.events.put(('landuse_error', (window, run, status, str(exc))))
             threading.Thread(target=worker, daemon=True).start()
@@ -788,18 +875,9 @@ class Window(tk.Tk):
                 elif kind == 'diagnostic_error':
                     self._log('No se pudo mostrar el ráster hidrológico: ' + value)
                 elif kind == 'landuse_done':
-                    window, table, button, status, summary, saved = value
+                    window, on_result, summary, saved = value
                     if window.winfo_exists():
-                        for item in table.get_children():
-                            table.delete(item)
-                        for item in summary['superficies']:
-                            table.insert('', 'end', values=(item['uso'], f"{item['ha']:.4f}"))
-                        status.set(f"{summary['poligonos_intersectados']} polígonos · "
-                                   f"{summary['usos_m2']/10_000:.4f} ha clasificados · "
-                                   f"cuenca vectorial {summary['cuenca_m2']/10_000:.4f} ha · "
-                                   f"diferencia {summary['desviacion_m2']/10_000:+.4f} ha. "
-                                   f"Guardado en {saved.name}")
-                        button.configure(state='normal')
+                        on_result(summary, saved)
                 elif kind == 'landuse_error':
                     window, button, status, detail = value
                     if window.winfo_exists():

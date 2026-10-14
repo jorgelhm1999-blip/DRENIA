@@ -7,6 +7,7 @@ import fiona
 from shapely.geometry import box, mapping
 
 from landuse import landuse_summary, yt_factors
+from norm52 import DEFAULT_EQUIVALENCES, threshold_summary
 
 
 class LanduseTest(unittest.TestCase):
@@ -36,6 +37,18 @@ class LanduseTest(unittest.TestCase):
             self.assertEqual(result['usos_m2'], 10_000)
             self.assertEqual({x['uso']: x['m2'] for x in result['superficies']},
                              {'Ensanche': 5_000, 'Zona verde urbana': 5_000})
+            areas = {x['uso']: x['m2'] for x in result['superficies']}
+            threshold = threshold_summary(areas, 'B', DEFAULT_EQUIVALENCES)
+            self.assertEqual(threshold['p0_inicial_ponderado_mm'], 18.5)
+            self.assertEqual(threshold_summary(areas, 'A', DEFAULT_EQUIVALENCES)
+                             ['p0_inicial_ponderado_mm'], 38.5)
+
+    def test_ambiguous_equivalence_is_not_guessed(self):
+        result = threshold_summary({'Cultivo herbáceo': 1000}, 'B', DEFAULT_EQUIVALENCES)
+        self.assertIsNone(result['p0_inicial_ponderado_mm'])
+        self.assertEqual(result['area_sin_equivalencia_m2'], 1000)
+        dry = threshold_summary({'Cultivo herbáceo · secano': 1000}, 'B', DEFAULT_EQUIVALENCES)
+        self.assertEqual(dry['p0_inicial_ponderado_mm'], 21)
 
 
 if __name__ == '__main__':

@@ -68,7 +68,7 @@ def _label(raw: object) -> str:
             label = label.encode('latin-1').decode('utf-8')
         except UnicodeError:
             break
-    return label
+    return label.replace('\u00ad', '')
 
 
 def landuse_summary(basin_file: Path, landuse_file: Path) -> dict:
@@ -111,7 +111,15 @@ def landuse_summary(basin_file: Path, landuse_file: Path) -> dict:
                 continue
             area = polygon.intersection(basin).area
             if area:
-                totals[_label(feature['properties']['TC_SIOSE_C'])] += area
+                label = _label(feature['properties']['TC_SIOSE_C'])
+                code = feature['properties'].get('SIOSE_CODE') or ''
+                # Only exact, single-use SIOSE codes separate dry and irrigated crops.
+                # Compound codes stay visible for individual review.
+                if label == 'Cultivo herbáceo' and code == 'CHLsc':
+                    label += ' · secano'
+                elif label == 'Cultivo herbáceo' and code == 'CHLrr':
+                    label += ' · regadío'
+                totals[label] += area
                 n += 1
     area = basin.area
     return {'cuenca_m2': area, 'usos_m2': sum(totals.values()),
