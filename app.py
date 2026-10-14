@@ -21,7 +21,9 @@ from engine import (compare_basins, delineate, index_tiles, locate_whitebox,
 from ortho import local_ortho_image, pnoa_image
 from diagnostics import diagnostic_preview
 from landuse import landuse_summary, save_landuse_summary, yt_factors
+from landuse import RETURN_PERIODS
 from norm52 import DEFAULT_EQUIVALENCES, GROUPS, NORM_USES, threshold_summary
+from flow import concentration_time, rational_flows
 
 
 class Window(tk.Tk):
@@ -124,7 +126,7 @@ class Window(tk.Tk):
         self.calculate = ttk.Button(left, text='Delimitar cuenca', command=self.start)
         self.calculate.pack(fill='x', pady=(12, 5), ipady=7)
         ttk.Button(left, text='Abrir análisis guardado…', command=self.pick_saved_result).pack(fill='x')
-        ttk.Button(left, text='Precipitación YT y superficies de usos…',
+        ttk.Button(left, text='Usos, precipitación y caudales…',
                    command=self.show_landuse).pack(fill='x', pady=(5, 0))
         self.status = tk.StringVar(value='Elige una carpeta con teselas GeoTIFF.')
         ttk.Label(left, textvariable=self.status, wraplength=300,
@@ -221,6 +223,12 @@ class Window(tk.Tk):
             messagebox.showinfo('Falta la cuenca', 'Delimita o abre primero un análisis guardado.')
             return
         folder = Path(self.output.get())
+        config = folder/'config_analisis.json'
+        try:
+            saved_config = json.loads(config.read_text(encoding='utf-8')) if config.is_file() else {}
+        except (OSError, ValueError):
+            saved_config = {}
+        report_dir = tk.StringVar(value=saved_config.get('carpeta_informes', str(folder)))
         window = tk.Toplevel(self)
         window.title('DRENIA · YT, superficies y umbral de escorrentía')
         window.geometry('850x650')
@@ -230,7 +238,7 @@ class Window(tk.Tk):
         ttk.Label(frame, text='Factores YT de máximas lluvias diarias',
                   font=('Segoe UI', 11, 'bold')).pack(anchor='w')
         ttk.Label(frame, text='Tabla aportada: Cv 0,30–0,52. Valores intermedios por interpolación lineal.').pack(anchor='w')
-        cv = tk.StringVar(value='0,34')
+        cv = tk.StringVar(value=saved_config.get('cv', '0,34'))
         row = ttk.Frame(frame)
         row.pack(fill='x', pady=(8, 3))
         ttk.Label(row, text='Cv').pack(side='left')
@@ -250,7 +258,7 @@ class Window(tk.Tk):
         ttk.Separator(frame).pack(fill='x', pady=8)
         ttk.Label(frame, text='Superficies dentro de la cuenca',
                   font=('Segoe UI', 11, 'bold')).pack(anchor='w')
-        source = tk.StringVar()
+        source = tk.StringVar(value=saved_config.get('fuente_usos', ''))
         ttk.Entry(frame, textvariable=source).pack(fill='x', pady=(8, 3))
         ttk.Button(frame, text='Elegir GeoPackage de usos…',
                    command=lambda: source.set(filedialog.askopenfilename(parent=window,
@@ -306,7 +314,9 @@ class Window(tk.Tk):
                 p0_label.set(f"Sin equivalencia: {result['area_sin_equivalencia_m2']/10_000:.4f} ha")
             else:
                 p0_label.set(f"P₀ⁱ ponderado: {result['p0_inicial_ponderado_mm']:.3f} mm")
-            (folder/'umbrales_52ic.json').write_text(
+            target = Path(report_dir.get())
+            target.mkdir(parents=True, exist_ok=True)
+            (target/'umbrales_52ic.json').write_text(
                 json.dumps({'tabla': '5.2-IC, tabla 2.3', 'fuente': source.get(),
                             'equivalencias': mapping, **result},
                            ensure_ascii=False, indent=2), encoding='utf-8')
@@ -336,7 +346,7 @@ class Window(tk.Tk):
             mapping.clear()
             mapping.update({entry['uso']: DEFAULT_EQUIVALENCES.get(entry['uso'])
                             for entry in summary['superficies']})
-            previous = folder/'umbrales_52ic.json'
+            previous = Path(report_dir.get())/'umbrales_52ic.json'
             if previous.is_file():
                 try:
                     old = json.loads(previous.read_text(encoding='utf-8'))
@@ -354,6 +364,130 @@ class Window(tk.Tk):
                        f"Guardado en {saved.name} y umbrales_52ic.json")
             run.configure(state='normal')
 
+        def save_all():
+            target = Path(report_dir.get())
+            target.mkdir(parents=True, exist_ok=True)
+            if current['summary'] is not None:
+                save_landuse_summary(target, current['summary'], Path(source.get()))
+                refresh_threshold()
+            data = {'carpeta_informes': str(target), 'fuente_usos': source.get(),
+                    'cv': cv.get(), 'grupo_suelo': group.get()}
+            config.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+            status.set(f'Datos guardados en: {target}')
+
+        def show_flows():
+            dialog = tk.Toplevel(window)
+            dialog.title('DRENIA · Parámetros y caudales racionales')
+            dialog.geometry('780x690')
+            outer = ttk.Frame(dialog, padding=14)
+            outer.pack(fill='both', expand=True)
+            ttk.Label(outer, text='Método racional · Cuenca menor de 50 km²',
+                      font=('Segoe UI', 12, 'bold')).pack(anchor='w')
+            ttk.Label(outer, text='Introduce βm de la región y FT de cada periodo. Tc puede indicarse directamente o calcularse con L y J.',
+                      wraplength=740).pack(anchor='w', pady=4)
+            inputs = ttk.Frame(outer)
+            inputs.pack(fill='x', pady=9)
+            stored = Path(report_dir.get())/'parametros_caudales.json'
+            try:
+                initial = json.loads(stored.read_text(encoding='utf-8')) if stored.is_file() else {}
+            except (OSError, ValueError):
+                initial = {}
+            variables = {}
+            fields = [('lluvia_media_mm', 'Precipitación diaria media (mm)', ''),
+                      ('beta_m', 'βm regional', ''),
+                      ('i1_id', 'I₁/Id', '10'),
+                      ('longitud_km', 'Longitud cauce principal (km)', ''),
+                      ('pendiente', 'Pendiente media cauce (m/m)', ''),
+                      ('tc_h', 'Tc directo (h; opcional)', '')]
+            for index, (key, label, default) in enumerate(fields):
+                ttk.Label(inputs, text=label).grid(row=index//2, column=(index%2)*2,
+                                                    sticky='w', padx=(0, 5), pady=4)
+                variable = tk.StringVar(value=initial.get(key, default))
+                ttk.Entry(inputs, textvariable=variable, width=15).grid(
+                    row=index//2, column=(index%2)*2+1, padx=(0, 25), pady=4)
+                variables[key] = variable
+            ttk.Label(outer, text='FT por periodo de retorno · deja vacíos los periodos aún sin dato').pack(anchor='w')
+            periods = ttk.Frame(outer)
+            periods.pack(fill='x', pady=6)
+            ft = {}
+            for i, period in enumerate(RETURN_PERIODS):
+                ttk.Label(periods, text=f'T{period}').grid(row=i//4*2, column=i%4*2,
+                                                           sticky='w', padx=5)
+                v = tk.StringVar(value=initial.get('ft', {}).get(str(period), ''))
+                ttk.Entry(periods, textvariable=v, width=11).grid(
+                    row=i//4*2+1, column=i%4*2, padx=(5, 22))
+                ft[period] = v
+            info = tk.StringVar(value='Completa los parámetros; T5, T100 y T500 tienen prioridad.')
+            ttk.Label(outer, textvariable=info, wraplength=730).pack(anchor='w', pady=6)
+            outputs = ttk.Treeview(outer, columns=('t', 'pd', 'po', 'c', 'it', 'q'), show='headings')
+            for key, heading, width in [('t', 'T (años)', 70), ('pd', 'Pd (mm)', 100),
+                                        ('po', 'P₀ (mm)', 100), ('c', 'C', 90),
+                                        ('it', 'I (mm/h)', 110), ('q', 'Q (m³/s)', 120)]:
+                outputs.heading(key, text=heading)
+                outputs.column(key, width=width, anchor='center')
+            outputs.pack(fill='both', expand=True, pady=8)
+
+            def collect():
+                return {k: v.get().strip() for k, v in variables.items()} | {
+                    'ft': {str(t): v.get().strip() for t, v in ft.items()}}
+
+            def store_inputs():
+                target = Path(report_dir.get())
+                target.mkdir(parents=True, exist_ok=True)
+                (target/'parametros_caudales.json').write_text(
+                    json.dumps(collect(), ensure_ascii=False, indent=2), encoding='utf-8')
+                save_all()
+                info.set(f'Parámetros guardados en: {target}')
+
+            def calculate_flows():
+                try:
+                    if current['summary'] is None:
+                        raise ValueError('Calcula primero las superficies de usos.')
+                    area_by_use = {item['uso']: item['m2'] for item in current['summary']['superficies']}
+                    threshold = threshold_summary(area_by_use, group.get(), mapping)
+                    if threshold['p0_inicial_ponderado_mm'] is None:
+                        raise ValueError(f"Faltan equivalencias en {threshold['area_sin_equivalencia_m2']/10_000:.4f} ha.")
+                    data = collect()
+                    number = lambda value: float(value.replace(',', '.'))
+                    tc = (number(data['tc_h']) if data['tc_h'] else
+                          concentration_time(number(data['longitud_km']), number(data['pendiente'])))
+                    result = rational_flows(
+                        area_km2=json.loads((folder/'resultado.json').read_text(encoding='utf-8'))['area_km2'],
+                        p0_initial=threshold['p0_inicial_ponderado_mm'],
+                        cv=number(cv.get()), mean_daily_rain_mm=number(data['lluvia_media_mm']),
+                        beta_m=number(data['beta_m']), torrentiality=number(data['i1_id']),
+                        tc_hours=tc, ft={t: number(v) for t, v in data['ft'].items() if v})
+                    for item in outputs.get_children():
+                        outputs.delete(item)
+                    for item in result['periodos']:
+                        if item['estado'] == 'Calculado':
+                            outputs.insert('', 'end', values=(item['periodo'], f"{item['pd_mm']:.3f}",
+                                f"{item['p0_mm']:.3f}", f"{item['coeficiente_escorrentia']:.4f}",
+                                f"{item['intensidad_mm_h']:.3f}", f"{item['caudal_m3_s']:.4f}"))
+                        else:
+                            outputs.insert('', 'end', values=(item['periodo'], '—', '—', '—', '—', 'Falta FT'))
+                    target = Path(report_dir.get())
+                    target.mkdir(parents=True, exist_ok=True)
+                    (target/'caudales.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+                    (target/'parametros_caudales.json').write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+                    save_all()
+                    info.set(f"Tc {tc:.3f} h · KA {result['ka']:.4f} · Kt {result['kt']:.4f} · resultados: {target/'caudales.json'}")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    messagebox.showerror('Faltan datos para el caudal', str(exc), parent=dialog)
+            actions = ttk.Frame(outer)
+            actions.pack(anchor='w')
+            ttk.Button(actions, text='Guardar parámetros', command=store_inputs).pack(side='left')
+            ttk.Button(actions, text='Calcular caudales', command=calculate_flows).pack(side='left', padx=8)
+
+        save_row = ttk.Frame(frame)
+        save_row.pack(fill='x', pady=(5, 0))
+        ttk.Button(save_row, text='Guardar', command=save_all).pack(side='left')
+        ttk.Button(save_row, text='Parámetros y caudales…', command=show_flows).pack(side='left', padx=6)
+        ttk.Button(save_row, text='Guardar en…', command=lambda: report_dir.set(
+            filedialog.askdirectory(parent=window, title='Carpeta para informes y parámetros')
+            or report_dir.get())).pack(side='left', padx=6)
+        ttk.Label(save_row, textvariable=report_dir, wraplength=540).pack(side='left', padx=7)
+
         def calculate():
             path = Path(source.get())
             if not path.is_file():
@@ -365,12 +499,21 @@ class Window(tk.Tk):
             def worker():
                 try:
                     summary = landuse_summary(folder/'cuenca.gpkg', path)
-                    saved = save_landuse_summary(folder, summary, path)
+                    saved = save_landuse_summary(Path(report_dir.get()), summary, path)
                     self.events.put(('landuse_done', (window, on_result, summary, saved)))
                 except Exception as exc:
                     self.events.put(('landuse_error', (window, run, status, str(exc))))
             threading.Thread(target=worker, daemon=True).start()
         run.configure(command=calculate)
+        prior = Path(report_dir.get())/'superficies_usos.json'
+        if prior.is_file():
+            try:
+                prior_data = json.loads(prior.read_text(encoding='utf-8'))
+                if not source.get():
+                    source.set(prior_data.get('fuente', ''))
+                on_result(prior_data, prior)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
 
     def restore_saved_result(self, destination: Path):
         result, work = open_saved_result(destination)
