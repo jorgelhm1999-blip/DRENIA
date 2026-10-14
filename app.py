@@ -231,7 +231,7 @@ class Window(tk.Tk):
         report_dir = tk.StringVar(value=saved_config.get('carpeta_informes', str(folder)))
         window = tk.Toplevel(self)
         window.title('DRENIA · YT, superficies y umbral de escorrentía')
-        window.geometry('850x650')
+        window.geometry('1000x700')
         window.transient(self)
         frame = ttk.Frame(window, padding=14)
         frame.pack(fill='both', expand=True)
@@ -283,17 +283,31 @@ class Window(tk.Tk):
         table.heading('p0', text='P₀ⁱ (mm)')
         table.column('uso', width=300)
         table.column('ha', width=130, anchor='e')
-        table.column('norma', width=140, anchor='center')
+        table.column('norma', width=270, anchor='w')
         table.column('p0', width=90, anchor='e')
         table.pack(fill='both', expand=True, pady=7)
         assignment = ttk.Frame(frame)
         assignment.pack(fill='x')
         ttk.Label(assignment, text='Fila normativa para el uso seleccionado').pack(side='left')
-        options = ['Sin equivalencia'] + [f'{key} · {value.label}' for key, value in NORM_USES.items()]
+        def option_name(key, use):
+            conditions = ', '.join(x for x in (f'pendiente {use.slope} %' if use.slope != '—' else '',
+                                                f'cultivo {use.practice}' if use.practice != '—' else '') if x)
+            return (f'{key[:5]} · {use.label}' + (f' · {conditions}' if conditions else '') +
+                    f' · {use.values[0]}/{use.values[1]}/{use.values[2]}/{use.values[3]} mm')
+        options_by_key = {key: option_name(key, use) for key, use in NORM_USES.items()}
+        key_by_option = {label: key for key, label in options_by_key.items()}
+        options = ['Sin equivalencia'] + list(options_by_key.values())
+        search = tk.StringVar()
+        ttk.Label(assignment, text='Buscar').pack(side='left', padx=(9, 3))
+        ttk.Entry(assignment, textvariable=search, width=16).pack(side='left')
         selected_norm = tk.StringVar(value=options[0])
         norm_box = ttk.Combobox(assignment, textvariable=selected_norm, values=options,
-                                state='readonly', width=38)
+                                state='readonly', width=58)
         norm_box.pack(side='left', padx=6)
+        def filter_options(*_):
+            needle = search.get().casefold().strip()
+            norm_box['values'] = [value for value in options if needle in value.casefold()]
+        search.trace_add('write', filter_options)
         mapping = {}
         current = {'summary': None}
 
@@ -306,9 +320,11 @@ class Window(tk.Tk):
             for item in table.get_children():
                 table.delete(item)
             for entry in result['filas']:
+                norm = NORM_USES.get(entry['fila_52ic'])
+                display_norm = (f"{entry['fila_52ic'][:5]} · {norm.label}" if norm else 'Revisar')
                 table.insert('', 'end', iid=entry['uso_siose'], values=(
                     entry['uso_siose'], f"{entry['area_m2']/10_000:.4f}",
-                    entry['fila_52ic'] or 'Revisar',
+                    display_norm,
                     entry['p0_inicial_mm'] if entry['p0_inicial_mm'] is not None else '—'))
             if result['p0_inicial_ponderado_mm'] is None:
                 p0_label.set(f"Sin equivalencia: {result['area_sin_equivalencia_m2']/10_000:.4f} ha")
@@ -327,8 +343,7 @@ class Window(tk.Tk):
             chosen = table.selection()
             if chosen:
                 code = mapping.get(chosen[0])
-                selected_norm.set(next((item for item in options if item.startswith(code + ' · ')),
-                                       options[0]) if code else options[0])
+                selected_norm.set(options_by_key.get(code, options[0]))
         table.bind('<<TreeviewSelect>>', select_row)
 
         def apply_assignment():
@@ -336,7 +351,11 @@ class Window(tk.Tk):
             if not chosen:
                 messagebox.showinfo('Selecciona un uso', 'Selecciona primero una fila de la tabla.', parent=window)
                 return
-            mapping[chosen[0]] = selected_norm.get().split(' · ', 1)[0] if selected_norm.get() != options[0] else None
+            selected = selected_norm.get()
+            if selected != options[0] and selected not in key_by_option:
+                messagebox.showerror('Fila no válida', 'Selecciona una fila de la lista.', parent=window)
+                return
+            mapping[chosen[0]] = key_by_option.get(selected)
             refresh_threshold()
             table.selection_set(chosen[0])
         ttk.Button(assignment, text='Aplicar', command=apply_assignment).pack(side='left')

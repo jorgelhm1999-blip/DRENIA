@@ -21,11 +21,14 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(rows[200]['estado'], 'Falta Ft')
 
     def test_norm_rows_with_same_code_remain_distinct(self):
-        self.assertGreaterEqual(len(NORM_USES), 110)
+        self.assertEqual(len(NORM_USES), 177)
         self.assertEqual(NORM_USES['21100-abandonadas'].values, (20, 14, 11, 8))
         self.assertEqual(NORM_USES['21100-hortalizas'].values, (29, 19, 14, 11))
         self.assertEqual(NORM_USES['21100-viveros'].values, (75, 34, 19, 14))
         self.assertEqual(NORM_USES['51220'].values, (0, 0, 0, 0))
+        self.assertEqual(NORM_USES['23100-abandonados'].values, (58, 25, 12, 7))
+        self.assertEqual(NORM_USES['23100-abandonados-ge3'].values, (24, 14, 8, 6))
+        self.assertEqual(NORM_USES['23100-arbolados'].values, (120, 55, 22, 14))
 
 
 if __name__ == '__main__':
