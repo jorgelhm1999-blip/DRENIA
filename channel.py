@@ -94,6 +94,7 @@ def main_channel(basin_file: Path, pointer_file: Path, accumulation_file: Path,
         transform = basin.window_transform(win)
         coords = [list(rasterio.transform.xy(transform, idx//w, idx%w)) for idx in indices]
         return {'longitud_m': length, 'longitud_km': length/1000,
+                'cabecera_x': coords[0][0], 'cabecera_y': coords[0][1],
                 'cota_max_m': float(np.max(heights)), 'cota_min_m': float(np.min(heights)),
                 'cota_cabecera_m': float(heights[0]), 'cota_vertido_m': float(heights[-1]),
                 'pendiente_m_m': slope, 'tc_h': concentration_time(length/1000, slope),

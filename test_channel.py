@@ -38,6 +38,9 @@ class ChannelTest(unittest.TestCase):
             self.assertAlmostEqual(result['longitud_m'], 10)
             self.assertEqual(result['celdas_trazado'], 6)
             self.assertEqual((result['cota_max_m'], result['cota_min_m']), (110, 100))
+            self.assertEqual((result['cabecera_x'], result['cabecera_y']),
+                             (500005, 4399999))
+            self.assertEqual((result['cota_cabecera_m'], result['cota_vertido_m']), (110, 100))
             self.assertAlmostEqual(result['pendiente_m_m'], 1)
             self.assertTrue(save_channel(root, result).is_file())
 

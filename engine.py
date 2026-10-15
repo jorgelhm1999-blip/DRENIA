@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,6 +113,8 @@ def run_tool(exe: Path, name: str, wd: Path, args: list[str], log: Log) -> None:
     log(f'Analizando: {name}')
     logfile = wd / 'registro_motor.txt'
     recent, diagnostic = [], []
+    last_progress = -1
+    last_signal = time.monotonic()
     with logfile.open('a', encoding='utf-8') as record:
         record.write('\n=== ' + name + ' ===\n')
         record.write('Ejecutable: ' + str(exe) + '\n')
@@ -123,6 +127,16 @@ def run_tool(exe: Path, name: str, wd: Path, args: list[str], log: Log) -> None:
             line = line.strip()
             if line:
                 record.write(line + '\n')
+                if time.monotonic() - last_signal >= 30:
+                    log(f'{name}: el motor sigue emitiendo información.')
+                    last_signal = time.monotonic()
+                progress = re.search(r'(?<!\d)(\d{1,3})\s*%', line)
+                if progress:
+                    percent = int(progress.group(1))
+                    if 0 <= percent <= 100 and (percent == 100 or percent // 10 > last_progress // 10):
+                        last_progress = percent
+                        log(f'{name}: {percent}%')
+                        last_signal = time.monotonic()
                 recent.append(line)
                 recent = recent[-30:]
                 if any(word in line.lower() for word in

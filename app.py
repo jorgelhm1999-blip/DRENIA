@@ -8,6 +8,7 @@ import math
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -60,6 +61,11 @@ class Window(tk.Tk):
         self.image_ref = None
         self.events = queue.Queue()
         self.busy = False
+        self.started_at = None
+        self.last_activity = None
+        self.phase = ''
+        self.channel_generation = 0
+        self.channel_head = None
         self.folder = tk.StringVar()
         self.output = tk.StringVar()
         self.binary = tk.StringVar()
@@ -136,6 +142,12 @@ class Window(tk.Tk):
         self.status = tk.StringVar(value='Elige una carpeta con teselas GeoTIFF.')
         ttk.Label(left, textvariable=self.status, wraplength=300,
                   foreground='#11645d').pack(anchor='w', pady=(3, 0))
+        self.timer_status = tk.StringVar(value='')
+        ttk.Label(left, textvariable=self.timer_status, wraplength=300,
+                  foreground='#486378').pack(anchor='w', pady=(3, 0))
+        self.channel_summary = tk.StringVar(value='Cabecera y cotas: disponibles después de delimitar la cuenca.')
+        ttk.Label(left, textvariable=self.channel_summary, wraplength=300,
+                  foreground='#254d78').pack(anchor='w', pady=(7, 0))
         ttk.Separator(left).pack(fill='x', pady=13)
         ttk.Label(left, text='Motor hidrológico (WhiteboxTools)',
                   font=('Segoe UI', 9, 'bold')).pack(anchor='w')
@@ -194,6 +206,61 @@ class Window(tk.Tk):
         self.log.insert('end', line + '\n')
         self.log.see('end')
         self.log.configure(state='disabled')
+
+    def _start_clock(self, phase):
+        self.started_at = self.last_activity = time.monotonic()
+        self.phase = phase
+
+    def _stop_clock(self):
+        if self.started_at is not None:
+            elapsed = int(time.monotonic() - self.started_at)
+            self.timer_status.set(f'Tiempo de cálculo: {elapsed//60:02d}:{elapsed%60:02d}')
+        self.started_at = None
+
+    def _update_clock(self):
+        if self.started_at is None:
+            return
+        now = time.monotonic()
+        elapsed = int(now - self.started_at)
+        silence = int(now - self.last_activity)
+        self.timer_status.set(f'{self.phase} · {elapsed//60:02d}:{elapsed%60:02d} transcurridos · '
+                              f'{silence//60:02d}:{silence%60:02d} sin noticias del motor')
+
+    def _load_channel(self, destination, result):
+        self.channel_generation += 1
+        generation = self.channel_generation
+        self.channel_head = None
+        self.channel_summary.set('Calculando cabecera, cotas y longitud del cauce principal…')
+        self.draw()
+        threshold_text = self.threshold.get()
+
+        def worker():
+            try:
+                work = Path(result['directorio_final'])
+                files = [destination/'cuenca_mascara.tif', work/'direccion_d8.tif',
+                         work/'acumulacion_celdas.tif', work/'mosaico.tif']
+                threshold = float(threshold_text.replace(',', '.'))
+                fingerprint = [(p.stat().st_size, p.stat().st_mtime_ns) for p in files]
+                cache = destination/'cauce_principal_metricas.json'
+                metrics = None
+                if cache.is_file():
+                    saved = json.loads(cache.read_text(encoding='utf-8'))
+                    if (saved.get('umbral_cauce_km2') == threshold and
+                            saved.get('punto_vertido') == result['punto_ajustado'] and
+                            saved.get('fuentes') == [list(x) for x in fingerprint] and
+                            'cabecera_x' in saved):
+                        metrics = saved
+                if metrics is None:
+                    metrics = main_channel(*files, tuple(result['punto_ajustado']), threshold)
+                    metrics['punto_vertido'] = result['punto_ajustado']
+                    metrics['fuentes'] = fingerprint
+                    save_channel(destination, metrics)
+                    cache.write_text(json.dumps({k: v for k, v in metrics.items() if k != 'geometry'},
+                                                ensure_ascii=False, indent=2), encoding='utf-8')
+                self.events.put(('main_channel_ready', (generation, metrics)))
+            except Exception as exc:
+                self.events.put(('main_channel_error', (generation, str(exc))))
+        threading.Thread(target=worker, daemon=True).start()
 
     def pick_folder(self):
         path = filedialog.askdirectory(title='Carpeta con MDT')
@@ -665,6 +732,7 @@ class Window(tk.Tk):
         if self.last_run:
             self.update_audit_options()
         self.status.set(f'Análisis recuperado · {result["area_km2"]:.4f} km²')
+        self._load_channel(destination, result)
         if not self.tiles:
             self._log('Análisis recuperado. Para recalcular o auditar, vuelve a seleccionar la carpeta de MDT.')
         self.draw()
@@ -734,6 +802,9 @@ class Window(tk.Tk):
             self.stream_overlay = None
             self.accum_path = None
             self.last_run = None
+            self.channel_generation += 1
+            self.channel_head = None
+            self.channel_summary.set('Cabecera y cotas: disponibles después de delimitar la cuenca.')
             self.audit_candidates = []
             self.hydro_folder = None
             self.diagnostic_images = {}
@@ -832,9 +903,12 @@ class Window(tk.Tk):
             Image.Resampling.BILINEAR))
         self.canvas.create_image(x0, y0, image=self.image_ref, anchor='nw')
         for position, color, label in ((self.outlet, '#fbc02d', 'Punto elegido'),
-                                       (self.result_outlet, '#00dfd4', 'Ajustado')):
+                                       (self.result_outlet, '#00dfd4', 'Ajustado'),
+                                       (self.channel_head, '#ff6b39', 'Cabecera')):
             if position:
                 left, bottom, right, top = self.preview_bounds
+                if not (left <= position[0] <= right and bottom <= position[1] <= top):
+                    continue
                 px = x0 + (position[0]-left)/(right-left)*image.width*scale
                 py = y0 + (top-position[1])/(top-bottom)*image.height*scale
                 self.canvas.create_oval(px-6, py-6, px+6, py+6, fill=color,
@@ -873,6 +947,10 @@ class Window(tk.Tk):
                         top - py/self.preview.height*(top-bottom)))
 
     def set_point(self, point):
+        if self.outlet != point:
+            self.channel_generation += 1
+            self.channel_head = None
+            self.channel_summary.set('Cabecera y cotas: disponibles después de delimitar la cuenca.')
         self.outlet = point
         self.x_coord.set(f'{point[0]:.2f}')
         self.y_coord.set(f'{point[1]:.2f}')
@@ -953,6 +1031,7 @@ class Window(tk.Tk):
             messagebox.showerror('Parámetros', str(exc))
             return
         self.busy = True
+        self._start_clock('Calculando cauces')
         self.calculate.configure(state='disabled')
         self.network_button.configure(state='disabled')
         self.audit_button.configure(state='disabled')
@@ -991,17 +1070,19 @@ class Window(tk.Tk):
             messagebox.showerror('Parámetros', str(exc))
             return
         self.busy = True
+        self._start_clock('Preparando el MDT')
         self.calculate.configure(state='disabled')
         self.network_button.configure(state='disabled')
         self.audit_button.configure(state='disabled')
         self.tile_box.configure(state='disabled')
-        self.status.set('Calculando. Puede tardar según el tamaño del MDT…')
+        self.status.set('Estamos rellenando la cuenca… Sigue el avance y el cronómetro debajo.')
         point, confirmed = self.outlet, self.result_outlet
         destination = Path(self.output.get())
         candidates = [tile for tile in self.tiles if tile.bounds[0] <= point[0] < tile.bounds[2]
                       and tile.bounds[1] < point[1] <= tile.bounds[3]]
         if not candidates:
             self.busy = False
+            self._stop_clock()
             self.calculate.configure(state='normal')
             self.network_button.configure(state='normal')
             self.tile_box.configure(state='readonly')
@@ -1085,7 +1166,18 @@ class Window(tk.Tk):
         try:
             while True:
                 kind, value = self.events.get_nowait()
-                if kind == 'log': self._log(value)
+                if kind == 'log':
+                    self._log(value)
+                    if self.started_at is not None:
+                        self.last_activity = time.monotonic()
+                        if value.startswith('Analizando: '):
+                            self.phase = value.replace('Analizando: ', '', 1)
+                        elif value.startswith('Teselas: '):
+                            self.phase = 'Preparando teselas'
+                        elif value.startswith('La cuenca alcanza el borde: '):
+                            self.phase = 'Ampliando la cuenca con más teselas'
+                        elif value.startswith('Punto ajustado a '):
+                            self.phase = 'Delimitando la cuenca'
                 elif kind == 'ortho_ready':
                     generation, picture = value
                     if generation == self.ortho_generation:
@@ -1121,8 +1213,25 @@ class Window(tk.Tk):
                     dialog, callback, detail = value
                     if dialog.winfo_exists():
                         callback(detail)
+                elif kind == 'main_channel_ready':
+                    generation, metrics = value
+                    if generation == self.channel_generation:
+                        self.channel_head = (metrics['cabecera_x'], metrics['cabecera_y'])
+                        self.channel_summary.set(
+                            f"Cabecera: X {metrics['cabecera_x']:.2f}, Y {metrics['cabecera_y']:.2f} "
+                            f"· cota {metrics['cota_cabecera_m']:.2f} m\n"
+                            f"Vertido: cota {metrics['cota_vertido_m']:.2f} m\n"
+                            f"Cauce: {metrics['longitud_km']:.3f} km · pendiente {metrics['pendiente_m_m']:.5f} "
+                            f"· Tc {metrics['tc_h']:.3f} h")
+                        self.draw()
+                elif kind == 'main_channel_error':
+                    generation, detail = value
+                    if generation == self.channel_generation:
+                        self.channel_summary.set('No se pudo determinar la cabecera: ' + detail)
+                        self._log('Cauce principal: ' + detail)
                 elif kind == 'error':
                     self.busy = False
+                    self._stop_clock()
                     self.calculate.configure(state='normal')
                     self.network_button.configure(state='normal')
                     self.tile_box.configure(state='readonly')
@@ -1132,6 +1241,7 @@ class Window(tk.Tk):
                     messagebox.showerror('Error de cálculo', value)
                 elif kind == 'network_ready':
                     self.busy = False
+                    self._stop_clock()
                     self.calculate.configure(state='normal')
                     self.network_button.configure(state='normal')
                     self.tile_box.configure(state='readonly')
@@ -1145,6 +1255,7 @@ class Window(tk.Tk):
                     self.status.set('Cauces calculados. Elige el vertido sobre una línea azul.')
                 elif kind == 'done':
                     self.busy = False
+                    self._stop_clock()
                     self.calculate.configure(state='normal')
                     self.network_button.configure(state='normal')
                     self.tile_box.configure(state='readonly')
@@ -1166,6 +1277,7 @@ class Window(tk.Tk):
                     self.status.set(f'Área: {result["area_km2"]:.4f} km² · '
                                     + ('sin borde detectado' if result['resultado_completo'] else 'borde sin cobertura'))
                     self.update_audit_options()
+                    self._load_channel(destination, result)
                     self.draw()
                     messagebox.showinfo('Cuenca delimitada',
                         f'Área: {result["area_km2"]:.4f} km²\n'
@@ -1175,6 +1287,7 @@ class Window(tk.Tk):
                         f'Resultados: {destination}')
                 elif kind == 'audit_done':
                     self.busy = False
+                    self._stop_clock()
                     self.calculate.configure(state='normal')
                     self.network_button.configure(state='normal')
                     self.audit_button.configure(state='normal')
@@ -1190,6 +1303,7 @@ class Window(tk.Tk):
                     self.status.set('Auditoría completada. Consulta diferencias_auditoria.tif.')
                     messagebox.showinfo('Comparación de teselas', message)
         except queue.Empty: pass
+        self._update_clock()
         self.after(120, self._poll)
 
 
