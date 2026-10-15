@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 import rasterio
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 
@@ -26,7 +26,7 @@ from landuse import landuse_summary, save_landuse_summary, yt_factors
 from flow import FLOW_PERIODS
 from norm52 import DEFAULT_EQUIVALENCES, GROUPS, NORM_USES, threshold_summary
 from flow import concentration_time, rational_flows, parse_ft
-from channel import main_channel, save_channel
+from channel import METHOD, hydrological_path, save_channel
 
 
 class Window(tk.Tk):
@@ -66,6 +66,7 @@ class Window(tk.Tk):
         self.phase = ''
         self.channel_generation = 0
         self.channel_head = None
+        self.channel_route = None
         self.folder = tk.StringVar()
         self.output = tk.StringVar()
         self.binary = tk.StringVar()
@@ -145,7 +146,7 @@ class Window(tk.Tk):
         self.timer_status = tk.StringVar(value='')
         ttk.Label(left, textvariable=self.timer_status, wraplength=300,
                   foreground='#486378').pack(anchor='w', pady=(3, 0))
-        self.channel_summary = tk.StringVar(value='Cabecera y cotas: disponibles después de delimitar la cuenca.')
+        self.channel_summary = tk.StringVar(value='Cabecera hidrológica: disponible después de delimitar la cuenca.')
         ttk.Label(left, textvariable=self.channel_summary, wraplength=300,
                   foreground='#254d78').pack(anchor='w', pady=(7, 0))
         ttk.Separator(left).pack(fill='x', pady=13)
@@ -230,33 +231,30 @@ class Window(tk.Tk):
         self.channel_generation += 1
         generation = self.channel_generation
         self.channel_head = None
-        self.channel_summary.set('Calculando cabecera, cotas y longitud del cauce principal…')
+        self.channel_route = None
+        self.channel_summary.set('Calculando el punto hidráulicamente más remoto de toda la cuenca…')
         self.draw()
-        threshold_text = self.threshold.get()
 
         def worker():
             try:
                 work = Path(result['directorio_final'])
                 files = [destination/'cuenca_mascara.tif', work/'direccion_d8.tif',
                          work/'acumulacion_celdas.tif', work/'mosaico.tif']
-                threshold = float(threshold_text.replace(',', '.'))
                 fingerprint = [(p.stat().st_size, p.stat().st_mtime_ns) for p in files]
-                cache = destination/'cauce_principal_metricas.json'
+                cache = destination/'recorrido_hidrologico_metricas.json'
                 metrics = None
                 if cache.is_file():
                     saved = json.loads(cache.read_text(encoding='utf-8'))
-                    if (saved.get('umbral_cauce_km2') == threshold and
+                    if (saved.get('metodo') == METHOD and 'geometry' in saved and
                             saved.get('punto_vertido') == result['punto_ajustado'] and
-                            saved.get('fuentes') == [list(x) for x in fingerprint] and
-                            'cabecera_x' in saved):
+                            saved.get('fuentes') == [list(x) for x in fingerprint]):
                         metrics = saved
                 if metrics is None:
-                    metrics = main_channel(*files, tuple(result['punto_ajustado']), threshold)
+                    metrics = hydrological_path(*files, tuple(result['punto_ajustado']))
                     metrics['punto_vertido'] = result['punto_ajustado']
                     metrics['fuentes'] = fingerprint
                     save_channel(destination, metrics)
-                    cache.write_text(json.dumps({k: v for k, v in metrics.items() if k != 'geometry'},
-                                                ensure_ascii=False, indent=2), encoding='utf-8')
+                    cache.write_text(json.dumps(metrics, ensure_ascii=False), encoding='utf-8')
                 self.events.put(('main_channel_ready', (generation, metrics)))
             except Exception as exc:
                 self.events.put(('main_channel_error', (generation, str(exc))))
@@ -474,7 +472,7 @@ class Window(tk.Tk):
             outer.pack(fill='both', expand=True)
             ttk.Label(outer, text='Método racional · Cuenca menor de 50 km²',
                       font=('Segoe UI', 12, 'bold')).pack(anchor='w')
-            ttk.Label(outer, text='DRENIA calcula L, J y Tc a partir de la red D8 guardada. Introduce βm regional y FT de cada periodo.',
+            ttk.Label(outer, text='DRENIA calcula L, J y Tc desde la cabecera hidrológica de toda la cuenca. Introduce βm regional y FT de cada periodo.',
                       wraplength=740).pack(anchor='w', pady=4)
             inputs = ttk.Frame(outer)
             inputs.pack(fill='x', pady=9)
@@ -487,8 +485,8 @@ class Window(tk.Tk):
             fields = [('lluvia_media_mm', 'Precipitación diaria media (mm)', ''),
                       ('beta_m', 'βm regional', ''),
                       ('i1_id', 'I₁/Id', '10'),
-                      ('longitud_km', 'Longitud cauce principal (km)', ''),
-                      ('pendiente', 'Pendiente media cauce (m/m)', ''),
+                      ('longitud_km', 'Recorrido hidráulico (km)', ''),
+                      ('pendiente', 'Pendiente media recorrido (m/m)', ''),
                       ('tc_h', 'Tc directo (h; opcional)', '')]
             for index, (key, label, default) in enumerate(fields):
                 ttk.Label(inputs, text=label).grid(row=index//2, column=(index%2)*2,
@@ -499,9 +497,9 @@ class Window(tk.Tk):
                 variables[key] = variable
             channel_row = ttk.Frame(outer)
             channel_row.pack(fill='x', pady=(0, 6))
-            channel_button = ttk.Button(channel_row, text='Calcular cauce principal, L, J y Tc')
+            channel_button = ttk.Button(channel_row, text='Calcular cabecera hidrológica, L, J y Tc')
             channel_button.pack(side='left')
-            channel_status = tk.StringVar(value='Longitud y pendiente editables; el trazado se obtiene del MDT y la red de cauces.')
+            channel_status = tk.StringVar(value='Longitud y pendiente editables; el trazado sigue todas las celdas D8 de la cuenca.')
             ttk.Label(channel_row, textvariable=channel_status, wraplength=510).pack(side='left', padx=9)
             ttk.Label(outer, text='FT por periodo de retorno · deja vacíos los periodos aún sin dato').pack(anchor='w')
             periods = ttk.Frame(outer)
@@ -532,49 +530,45 @@ class Window(tk.Tk):
                 variables['longitud_km'].set(f"{result['longitud_km']:.5f}")
                 variables['pendiente'].set(f"{result['pendiente_m_m']:.7f}")
                 variables['tc_h'].set('')
-                channel_status.set(f"Cotas {result['cota_max_m']:.2f}–{result['cota_min_m']:.2f} m · "
-                                   f"L {result['longitud_km']:.3f} km · J {result['pendiente_m_m']:.5f} · "
-                                   f"Tc {result['tc_h']:.3f} h")
+                tc = f"{result['tc_h']:.3f} h" if result['tc_h'] is not None else 'indeterminado (desnivel ≤ 0)'
+                channel_status.set(f"Cabecera {result['cota_cabecera_m']:.2f} m · vertido "
+                                   f"{result['cota_vertido_m']:.2f} m · L {result['longitud_km']:.3f} km · "
+                                   f"J {result['pendiente_m_m']:.5f} · Tc {tc}")
                 channel_button.configure(state='normal')
                 store_inputs()
 
             def on_channel_error(detail):
                 channel_button.configure(state='normal')
-                channel_status.set('No se pudo trazar el cauce: ' + detail)
+                channel_status.set('No se pudo trazar el recorrido: ' + detail)
 
             def start_channel():
                 channel_button.configure(state='disabled')
-                channel_status.set('Trazando cauce principal desde los rásteres guardados…')
-                try:
-                    threshold_km2 = float(self.threshold.get().replace(',', '.'))
-                except ValueError:
-                    on_channel_error('Introduce un área mínima drenada válida en la ventana principal.')
-                    return
+                channel_status.set('Calculando el recorrido D8 más largo de toda la cuenca…')
                 target = Path(report_dir.get())
 
                 def worker():
                     try:
                         basin_result, work = open_saved_result(folder)
-                        cache = target/'cauce_principal_metricas.json'
+                        cache = target/'recorrido_hidrologico_metricas.json'
                         files = [folder/'cuenca_mascara.tif', work/'direccion_d8.tif',
                                  work/'acumulacion_celdas.tif', work/'mosaico.tif']
                         fingerprint = [(p.stat().st_size, p.stat().st_mtime_ns) for p in files]
-                        if cache.is_file():
-                            stored_channel = json.loads(cache.read_text(encoding='utf-8'))
-                            if (stored_channel.get('umbral_cauce_km2') == threshold_km2 and
-                                    stored_channel.get('punto_vertido') == basin_result['punto_ajustado'] and
-                                    stored_channel.get('fuentes') == [list(x) for x in fingerprint]):
-                                self.events.put(('channel_ready', (dialog, on_channel, stored_channel)))
-                                return
-                        channel = main_channel(folder/'cuenca_mascara.tif', work/'direccion_d8.tif',
-                                               work/'acumulacion_celdas.tif', work/'mosaico.tif',
-                                               tuple(basin_result['punto_ajustado']), threshold_km2)
+                        for candidate in (cache, folder/'recorrido_hidrologico_metricas.json'):
+                            if candidate.is_file():
+                                stored_channel = json.loads(candidate.read_text(encoding='utf-8'))
+                                if (stored_channel.get('metodo') == METHOD and
+                                        stored_channel.get('punto_vertido') == basin_result['punto_ajustado'] and
+                                        stored_channel.get('fuentes') == [list(x) for x in fingerprint]):
+                                    self.events.put(('channel_ready', (dialog, on_channel, stored_channel)))
+                                    return
+                        channel = hydrological_path(folder/'cuenca_mascara.tif', work/'direccion_d8.tif',
+                                                    work/'acumulacion_celdas.tif', work/'mosaico.tif',
+                                                    tuple(basin_result['punto_ajustado']))
                         channel['punto_vertido'] = basin_result['punto_ajustado']
                         channel['fuentes'] = fingerprint
                         target.mkdir(parents=True, exist_ok=True)
                         save_channel(target, channel)
-                        cache.write_text(json.dumps({k: v for k, v in channel.items()
-                                                     if k != 'geometry'}, ensure_ascii=False, indent=2),
+                        cache.write_text(json.dumps(channel, ensure_ascii=False, indent=2),
                                          encoding='utf-8')
                         self.events.put(('channel_ready', (dialog, on_channel, channel)))
                     except Exception as exc:
@@ -804,7 +798,8 @@ class Window(tk.Tk):
             self.last_run = None
             self.channel_generation += 1
             self.channel_head = None
-            self.channel_summary.set('Cabecera y cotas: disponibles después de delimitar la cuenca.')
+            self.channel_route = None
+            self.channel_summary.set('Cabecera hidrológica: disponible después de delimitar la cuenca.')
             self.audit_candidates = []
             self.hydro_folder = None
             self.diagnostic_images = {}
@@ -860,7 +855,7 @@ class Window(tk.Tk):
         mode = self.view_mode.get()
         self.view_note.configure(text={
             'MDT': 'Altitud (m)',
-            'Dirección D8': 'Color = vecino receptor; códigos D8: E 1 · NE 2 · N 4 · NW 8 · W 16 · SO 32 · S 64 · SE 128',
+            'Dirección D8': 'Color = vecino receptor; Whitebox D8: NE 1 · E 2 · SE 4 · S 8 · SO 16 · O 32 · NO 64 · N 128',
             'Acumulación': 'Color claro = mayor número de celdas aguas arriba (escala logarítmica)',
         }[mode])
         if mode != 'MDT' and mode not in self.diagnostic_images:
@@ -898,13 +893,18 @@ class Window(tk.Tk):
             image = Image.alpha_composite(image.convert('RGBA'), self.stream_overlay).convert('RGB')
         if self.overlay is not None and self.overlay.size == image.size:
             image = Image.alpha_composite(image.convert('RGBA'), self.overlay).convert('RGB')
+        if self.channel_route and self.preview_bounds:
+            left, bottom, right, top = self.preview_bounds
+            pixels = [((x-left)/(right-left)*image.width, (top-y)/(top-bottom)*image.height)
+                      for x, y in self.channel_route]
+            ImageDraw.Draw(image).line(pixels, fill='#ff6138', width=3, joint='curve')
         self.image_ref = ImageTk.PhotoImage(image.resize(
             (max(1, round(image.width*scale)), max(1, round(image.height*scale))),
             Image.Resampling.BILINEAR))
         self.canvas.create_image(x0, y0, image=self.image_ref, anchor='nw')
         for position, color, label in ((self.outlet, '#fbc02d', 'Punto elegido'),
                                        (self.result_outlet, '#00dfd4', 'Ajustado'),
-                                       (self.channel_head, '#ff6b39', 'Cabecera')):
+                                       (self.channel_head, '#ff6b39', 'Cabecera hidrológica')):
             if position:
                 left, bottom, right, top = self.preview_bounds
                 if not (left <= position[0] <= right and bottom <= position[1] <= top):
@@ -950,7 +950,8 @@ class Window(tk.Tk):
         if self.outlet != point:
             self.channel_generation += 1
             self.channel_head = None
-            self.channel_summary.set('Cabecera y cotas: disponibles después de delimitar la cuenca.')
+            self.channel_route = None
+            self.channel_summary.set('Cabecera hidrológica: disponible después de delimitar la cuenca.')
         self.outlet = point
         self.x_coord.set(f'{point[0]:.2f}')
         self.y_coord.set(f'{point[1]:.2f}')
@@ -1217,12 +1218,14 @@ class Window(tk.Tk):
                     generation, metrics = value
                     if generation == self.channel_generation:
                         self.channel_head = (metrics['cabecera_x'], metrics['cabecera_y'])
+                        self.channel_route = metrics['geometry']['coordinates']
+                        tc = f"{metrics['tc_h']:.3f} h" if metrics['tc_h'] is not None else 'indeterminado'
                         self.channel_summary.set(
-                            f"Cabecera: X {metrics['cabecera_x']:.2f}, Y {metrics['cabecera_y']:.2f} "
+                            f"Cabecera hidrológica: X {metrics['cabecera_x']:.2f}, Y {metrics['cabecera_y']:.2f} "
                             f"· cota {metrics['cota_cabecera_m']:.2f} m\n"
-                            f"Vertido: cota {metrics['cota_vertido_m']:.2f} m\n"
-                            f"Cauce: {metrics['longitud_km']:.3f} km · pendiente {metrics['pendiente_m_m']:.5f} "
-                            f"· Tc {metrics['tc_h']:.3f} h")
+                            f"Vertido: cota {metrics['cota_vertido_m']:.2f} m · desnivel {metrics['desnivel_m']:.2f} m\n"
+                            f"Recorrido D8: {metrics['longitud_km']:.3f} km · pendiente {metrics['pendiente_m_m']:.5f} "
+                            f"· Tc {tc}")
                         self.draw()
                 elif kind == 'main_channel_error':
                     generation, detail = value

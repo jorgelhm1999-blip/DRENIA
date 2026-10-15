@@ -24,7 +24,7 @@ def diagnostic_preview(path: Path, kind: str, width: int, height: int) -> Image.
                 arr = reduced.read(1, masked=True)
     valid = ~np.ma.getmaskarray(arr)
     if kind == 'direction':
-        # Whitebox D8 pointer codes: E, NE, N, NW, W, SW, S, SE.
+        # Whitebox D8 pointer codes: NE, E, SE, S, SW, W, NW, N.
         palette = {1: (63, 116, 194), 2: (54, 170, 199), 4: (73, 168, 116),
                    8: (144, 185, 90), 16: (235, 196, 79), 32: (240, 145, 73),
                    64: (202, 91, 121), 128: (139, 95, 180)}

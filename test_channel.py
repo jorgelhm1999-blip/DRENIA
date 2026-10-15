@@ -7,7 +7,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
-from channel import main_channel, save_channel
+from channel import hydrological_path, save_channel
 
 
 class ChannelTest(unittest.TestCase):
@@ -32,9 +32,9 @@ class ChannelTest(unittest.TestCase):
                                ('acumulacion_celdas', accum), ('mosaico', dem)]:
                 with rasterio.open(root/f'{name}.tif', 'w', dtype=data.dtype, **profile) as dst:
                     dst.write(data, 1)
-            result = main_channel(*(root/f'{name}.tif' for name in
-                                    ('cuenca_mascara', 'direccion_d8', 'acumulacion_celdas', 'mosaico')),
-                                  (500005, 4399989), 0.000004)
+            result = hydrological_path(*(root/f'{name}.tif' for name in
+                                         ('cuenca_mascara', 'direccion_d8', 'acumulacion_celdas', 'mosaico')),
+                                       (500005, 4399989))
             self.assertAlmostEqual(result['longitud_m'], 10)
             self.assertEqual(result['celdas_trazado'], 6)
             self.assertEqual((result['cota_max_m'], result['cota_min_m']), (110, 100))
@@ -57,9 +57,62 @@ class ChannelTest(unittest.TestCase):
             for name, array in arrays.items():
                 with rasterio.open(root/f'{name}.tif', 'w', dtype=array.dtype, **p) as dst:
                     dst.write(array, 1)
-            result = main_channel(*(root/f'{name}.tif' for name in arrays),
-                                  (500003, 4399997), 0.000004)
+            result = hydrological_path(*(root/f'{name}.tif' for name in arrays),
+                                       (500003, 4399997))
             self.assertAlmostEqual(result['longitud_m'], 2*np.sqrt(2), places=6)
+
+    def test_remote_hillslope_beats_higher_short_tributary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            p = {'driver': 'GTiff', 'width': 6, 'height': 6, 'count': 1,
+                 'crs': 'EPSG:25830', 'transform': from_origin(500000, 4400000, 2, 2)}
+            mask = np.zeros((6, 6), dtype='uint8')
+            pointer = np.zeros_like(mask)
+            acc = np.zeros((6, 6), dtype='float32')
+            dem = np.zeros((6, 6), dtype='float32')
+            # Longest path starts in a hillslope cell (0,0), reaches the stream
+            # at (2,3), then follows the main channel to (5,3).
+            path = [(0,0), (0,1), (0,2), (1,2), (2,3), (3,3), (4,3), (5,3)]
+            codes = [2, 2, 8, 4, 8, 8, 8]
+            for i, (r, c) in enumerate(path):
+                mask[r,c] = 1
+                acc[r,c] = i+1 if i < 4 else i+3
+                dem[r,c] = 130-i*3
+                if i < len(codes):
+                    pointer[r,c] = codes[i]
+            mask[2,2] = 1
+            pointer[2,2] = 2  # short, higher tributary
+            acc[2,2] = 1
+            dem[2,2] = 220
+            for name, array in [('cuenca_mascara', mask), ('direccion_d8', pointer),
+                                ('acumulacion_celdas', acc), ('mosaico', dem)]:
+                with rasterio.open(root/f'{name}.tif', 'w', dtype=array.dtype, **p) as dst:
+                    dst.write(array, 1)
+            result = hydrological_path(*(root/f'{name}.tif' for name in
+                                         ('cuenca_mascara', 'direccion_d8', 'acumulacion_celdas', 'mosaico')),
+                                       (500007, 4399989))
+            self.assertEqual((result['cabecera_x'], result['cabecera_y']), (500001, 4399999))
+            self.assertEqual(result['cota_cabecera_m'], 130)
+            self.assertEqual(result['cota_vertido_m'], 109)
+            self.assertEqual(result['celdas_trazado'], 8)
+            self.assertAlmostEqual(result['longitud_m'], 12+2*np.sqrt(2), places=5)
+
+    def test_disconnected_basin_cell_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            p = {'driver': 'GTiff', 'width': 3, 'height': 3, 'count': 1,
+                 'crs': 'EPSG:25830', 'transform': from_origin(500000, 4400000, 2, 2)}
+            arrays = {
+                'cuenca_mascara': np.array([[1,0,1],[0,1,0],[0,0,0]], dtype='uint8'),
+                'direccion_d8': np.array([[4,0,0],[0,0,0],[0,0,0]], dtype='uint8'),
+                'acumulacion_celdas': np.array([[1,0,1],[0,2,0],[0,0,0]], dtype='float32'),
+                'mosaico': np.array([[10,0,12],[0,8,0],[0,0,0]], dtype='float32')}
+            for name, array in arrays.items():
+                with rasterio.open(root/f'{name}.tif', 'w', dtype=array.dtype, **p) as dst:
+                    dst.write(array, 1)
+            with self.assertRaisesRegex(ValueError, 'no llegan al vertido'):
+                hydrological_path(*(root/f'{name}.tif' for name in arrays),
+                                   (500003, 4399997))
 
 
 if __name__ == '__main__':
