@@ -27,6 +27,7 @@ from flow import FLOW_PERIODS
 from norm52 import DEFAULT_EQUIVALENCES, GROUPS, NORM_USES, threshold_summary
 from flow import concentration_time, rational_flows, parse_ft
 from channel import METHOD, hydrological_path, save_channel
+from excel_report import export_excel as write_excel_report
 
 
 class Window(tk.Tk):
@@ -500,6 +501,7 @@ class Window(tk.Tk):
             channel_button = ttk.Button(channel_row, text='Calcular cabecera hidrológica, L, J y Tc')
             channel_button.pack(side='left')
             channel_status = tk.StringVar(value='Longitud y pendiente editables; el trazado sigue todas las celdas D8 de la cuenca.')
+            channel_state = {'metrics': None}
             ttk.Label(channel_row, textvariable=channel_status, wraplength=510).pack(side='left', padx=9)
             ttk.Label(outer, text='FT por periodo de retorno · deja vacíos los periodos aún sin dato').pack(anchor='w')
             periods = ttk.Frame(outer)
@@ -527,6 +529,7 @@ class Window(tk.Tk):
                     'ft': {str(t): v.get().strip() for t, v in ft.items()}}
 
             def on_channel(result):
+                channel_state['metrics'] = result
                 variables['longitud_km'].set(f"{result['longitud_km']:.5f}")
                 variables['pendiente'].set(f"{result['pendiente_m_m']:.7f}")
                 variables['tc_h'].set('')
@@ -618,12 +621,35 @@ class Window(tk.Tk):
                     (target/'parametros_caudales.json').write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
                     save_all()
                     info.set(f"Tc {tc:.3f} h · KA {result['ka']:.4f} · Kt {result['kt']:.4f} · resultados: {target/'caudales.json'}")
+                    return result, threshold, data
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     messagebox.showerror('Faltan datos para el caudal', str(exc), parent=dialog)
+
+            def generate_excel():
+                calculated = calculate_flows()
+                if calculated is None:
+                    return
+                _, threshold, data = calculated
+                chosen = filedialog.asksaveasfilename(
+                    parent=dialog, title='Guardar Excel de caudales',
+                    initialdir=report_dir.get(), initialfile='DRENIA_caudales.xlsx',
+                    defaultextension='.xlsx', filetypes=[('Libro de Excel', '*.xlsx')])
+                if not chosen:
+                    return
+                try:
+                    path = write_excel_report(
+                        Path(chosen), basin=json.loads((folder/'resultado.json').read_text(encoding='utf-8')),
+                        landuse=current['summary'] | {'fuente': source.get()}, threshold=threshold,
+                        inputs=data | {'cv': cv.get()}, channel=channel_state['metrics'])
+                    info.set(f'Excel generado: {path}')
+                    messagebox.showinfo('Excel generado', f'Libro guardado en:\n{path}', parent=dialog)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    messagebox.showerror('No se pudo generar el Excel', str(exc), parent=dialog)
             actions = ttk.Frame(outer)
             actions.pack(anchor='w')
             ttk.Button(actions, text='Guardar parámetros', command=store_inputs).pack(side='left')
             ttk.Button(actions, text='Calcular caudales', command=calculate_flows).pack(side='left', padx=8)
+            ttk.Button(actions, text='Generar Excel…', command=generate_excel).pack(side='left', padx=8)
             start_channel()
 
         save_row = ttk.Frame(frame)
